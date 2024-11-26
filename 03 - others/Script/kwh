@@ -1,0 +1,12 @@
+#!/bin/bash
+
+# Lokasi file energy_uj
+ENERGY_FILE="/sys/class/powercap/intel-rapl:0/energy_uj"
+
+# Baca nilai energi dalam µJ
+ENERGY_UJ=$(cat $ENERGY_FILE)
+
+# Konversi ke kWh
+ENERGY_KWH=$(echo "scale=10; $ENERGY_UJ / (10^6 * 3.6 * 10^6)" | bc)
+
+echo "Total energi yang digunakan: $ENERGY_KWH kWh"
