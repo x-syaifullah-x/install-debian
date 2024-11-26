@@ -1,0 +1,24 @@
+#!/bin/sh
+
+if [ $(id -u) -ne 0 ]; then
+  echo "Must be superuser."; exit 1
+fi
+
+arg=$1
+CURRENT_DIR="/$(realpath --relative-to=/ $(dirname $0))"
+FILE_BACKUP="${CURRENT_DIR}/backup.tar.gz"
+case "$arg" in
+	backup)
+		tar --use-compress-program='gzip -9' -cvf $FILE_BACKUP "/etc/apt/sources.list" "/var/lib/apt"
+	;;
+	restore)
+		if [ -f "$FILE_BACKUP" ]; then
+			tar xzvf "$FILE_BACKUP" --directory="/"
+		else
+			echo "Can't find file $FILE_BACKUP"
+		fi
+	;;
+	*)
+	echo "Usage: $(basename $0) <backup|restore>"
+	;;
+esac
