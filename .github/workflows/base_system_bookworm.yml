@@ -1,0 +1,194 @@
+name: base_system_bookworm
+
+on:
+  push:
+    branches: [ master ]
+
+jobs:
+  base_system:
+    permissions: write-all
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        arch:
+          - amd64
+          - arm64
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ROOTFS_DIR: ${{ github.workspace }}/rootfs
+      ARCH: ${{ matrix.arch }}
+      CODENAME: bookworm
+
+    steps:
+      - name: CHECKOUT
+        uses: actions/checkout@v4
+
+      - name: SETUP DEBOOTSTRAP
+        run: |
+          _DOCKER_IMAGE="debian:$CODENAME"
+          _PLATFORM="linux/$ARCH"
+          _ARCH_HOST=$(dpkg --print-architecture)
+          if [ $_ARCH_HOST != $ARCH ]; then
+            sudo apt install --no-install-suggests --no-install-recommends qemu-user-static -y 2>&1 >/dev/null
+            docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+          fi
+          docker pull --platform $_PLATFORM $_DOCKER_IMAGE
+          container_name=x-000
+          mkdir -pv $ROOTFS_DIR
+          ROOTFS_DIR_NAME=$(basename $ROOTFS_DIR)
+          docker create --name "$container_name" --privileged -e "DEBIAN_FRONTEND=noninteractive" -v "$ROOTFS_DIR:/$ROOTFS_DIR_NAME" --entrypoint "tail" --platform "$_PLATFORM" "$_DOCKER_IMAGE" -f /dev/null
+          docker start $container_name
+          docker exec $container_name apt-get update 2>&1 >/dev/null
+          docker exec $container_name apt-get upgrade --no-install-suggests --no-install-recommends -y 2>&1 >/dev/null
+          docker exec $container_name apt-get install --no-install-suggests --no-install-recommends apt-utils debootstrap -y 2>&1 >/dev/null
+          export INCLUDE_PACKAGE="apt-utils,bash-completion,whiptail"
+          export EXCLUDE_PACKAGE="e2fsprogs,sysvinit-utils"
+          docker exec $container_name debootstrap --variant=minbase --arch $ARCH --exclude=$EXCLUDE_PACKAGE --include=$INCLUDE_PACKAGE $CODENAME /$ROOTFS_DIR_NAME http://deb.debian.org/debian
+
+      - name: CLEAN UP ROOTFS
+        run: |
+          for dir in dev root run var/cache var/lib/apt var/log; do
+            if [ -f "$ROOTFS_DIR/$dir" ]; then
+              sudo rm -rfv $ROOTFS_DIR/$dir
+              continue
+            fi
+            for i in $(sudo ls -A $ROOTFS_DIR/$dir 2>/dev/null); do
+              sudo rm -rfv $ROOTFS_DIR/$dir/$i
+            done
+          done
+
+      - name: SETUP SOURCE LIST
+        run: |
+          cat << EOF | sudo tee $ROOTFS_DIR/etc/apt/sources.list
+          deb http://deb.debian.org/debian                ${CODENAME}           main contrib non-free non-free-firmware
+          deb http://security.debian.org/debian-security  ${CODENAME}-security  main contrib non-free non-free-firmware
+          deb http://deb.debian.org/debian                ${CODENAME}-updates   main contrib non-free non-free-firmware
+          deb http://deb.debian.org/debian                ${CODENAME}-backports main contrib non-free non-free-firmware
+          EOF
+
+      - name: SETUP BASH BASHRC
+        run: |
+          cat << "EOF" | sudo tee $ROOTFS_DIR/etc/bash.bashrc
+          [ -z "$PS1" ] && return
+          shopt -s checkwinsize
+          if [ -z "${debian_chroot:-}" ] && [ -r /etc/debian_chroot ]; then
+            debian_chroot=$(cat /etc/debian_chroot)
+          fi
+          if ! [ -n "${SUDO_USER}" -a -n "${SUDO_PS1}" ]; then
+            PS1='${debian_chroot:+($debian_chroot)}\u@\h:\w\$ '
+          fi
+          if ! shopt -oq posix; then
+            . /usr/share/bash-completion/bash_completion
+          fi
+          EOF
+
+      - name: SETUP LOCALE
+        run: |
+          cat << EOF | sudo tee $ROOTFS_DIR/etc/default/locale
+          LANG=C.UTF-8
+          LANGUAGE=C.UTF-8
+          LC_ADDRESS=C.UTF-8
+          LC_ALL=C.UTF-8
+          LC_COLLATE=C.UTF-8
+          LC_CTYPE=C.UTF-8
+          LC_IDENTIFICATION=C.UTF-8
+          LC_MEASUREMENT=C.UTF-8
+          LC_MESSAGES=C.UTF-8
+          LC_MONETARY=C.UTF-8
+          LC_NAME=C.UTF-8
+          LC_NUMERIC=C.UTF-8
+          LC_PAPER=C.UTF-8
+          LC_TELEPHONE=C.UTF-8
+          LC_TIME=C.UTF-8
+          EOF
+
+      - name: SETUP KEYBOARD
+        run: |
+          cat << EOF | sudo tee $ROOTFS_DIR/etc/default/keyboard
+          XKBLAYOUT=us
+          EOF
+
+      - name: SETUP VCONSOLE
+        run: |
+          cat << EOF | sudo tee $ROOTFS_DIR/etc/vconsole.conf
+          KEYMAP=us
+          EOF
+
+      - name: SETUP DPKG CONF
+        run: |
+          X_DPKG=$ROOTFS_DIR/etc/dpkg/dpkg.cfg.d/x-dpkg
+          cat << EOF | sudo tee $X_DPKG
+          force-unsafe-io
+          path-exclude=/usr/share/doc/*
+          path-exclude=/usr/share/doc-base/*
+          path-exclude=/usr/share/man/*
+          path-exclude=/usr/share/info/*
+          path-exclude=/usr/share/lintian/*
+          path-exclude=/usr/share/locale/*
+          path-include=/usr/share/locale/en*
+          EOF
+          for _paths in $(sed -n 's|path-[a-z]*=\(/[^/]*\(/[^/]*\)*\)/.*|\1|p' $X_DPKG | uniq); do
+            for _path in $(ls -A "$ROOTFS_DIR$_paths"); do
+              sudo rm -rfv "$ROOTFS_DIR$_paths/$_path"
+            done
+          done
+
+      - name: MOUNT ROOTFS
+        run: |
+          sudo mount -v udev    -t devtmpfs $ROOTFS_DIR/dev         -o defaults,size=0
+          sudo mount -v devpts  -t devpts   $ROOTFS_DIR/dev/pts     -o defaults
+          sudo mount -v tmpfs   -t tmpfs    $ROOTFS_DIR/media       -o defaults,size=100%,nr_inodes=0,mode=0775
+          sudo mount -v tmpfs   -t tmpfs    $ROOTFS_DIR/mnt         -o defaults,size=100%,nr_inodes=0,mode=0775
+          sudo mount -v proc    -t proc     $ROOTFS_DIR/proc        -o defaults
+          sudo mount -v tmpfs   -t tmpfs    $ROOTFS_DIR/root        -o defaults,size=100%,nr_inodes=0,mode=0700
+          sudo mount -v tmpfs   -t tmpfs    $ROOTFS_DIR/run         -o defaults,size=100%,nr_inodes=0,mode=0775 && sudo mkdir -p $ROOTFS_DIR/run/lock
+          sudo mount -v tmpfs   -t tmpfs    $ROOTFS_DIR/run/lock    -o defaults,size=100%,nr_inodes=0,nosuid,nodev,noexec
+          sudo mount -v sysfs   -t sysfs    $ROOTFS_DIR/sys         -o defaults
+          sudo mount -v tmpfs   -t tmpfs    $ROOTFS_DIR/tmp         -o defaults,size=100%,nr_inodes=0,mode=1777,nosuid,nodev
+          sudo mount -v tmpfs   -t tmpfs    $ROOTFS_DIR/var/cache   -o defaults,size=100%,nr_inodes=0,mode=0755
+          sudo mount -v tmpfs   -t tmpfs    $ROOTFS_DIR/var/lib/apt -o defaults,size=100%,nr_inodes=0,mode=0755
+          sudo mount -v tmpfs   -t tmpfs    $ROOTFS_DIR/var/log     -o defaults,size=100%,nr_inodes=0,mode=0755
+
+      - name: SETUP WITH CHROOT
+        run: |
+          sudo chroot $ROOTFS_DIR /bin/bash << "EOF_CHROOT"
+          # REINSTALL ALL PACKAGE
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          packages=$(dpkg --get-selections | grep -v deinstall | awk '{print $1}')
+          apt-get install --no-install-recommends --no-install-suggests --reinstall $packages -y
+          echo "$packages" | wc -l
+          dpkg --clear-avail
+          exit
+          EOF_CHROOT
+
+      - name: CLEAN FILE NOT USE
+        run: |
+          [ -f $ROOTFS_DIR/etc/.pwd.lock ]                && sudo rm -rfv $ROOTFS_DIR/etc/.pwd.lock
+          [ -f $ROOTFS_DIR/etc/group- ]                   && sudo rm -rfv $ROOTFS_DIR/etc/group-
+          [ -f $ROOTFS_DIR/etc/gshadow- ]                 && sudo rm -rfv $ROOTFS_DIR/etc/gshadow-
+          [ -f $ROOTFS_DIR/etc/hostname ]                 && sudo rm -rfv $ROOTFS_DIR/etc/hostname
+          [ -f $ROOTFS_DIR/etc/passwd- ]                  && sudo rm -rfv $ROOTFS_DIR/etc/passwd-
+          [ -f $ROOTFS_DIR/etc/resolv.conf ]              && echo '' | sudo tee $ROOTFS_DIR/etc/resolv.conf
+          [ -f $ROOTFS_DIR/etc/shadow- ]                  && sudo rm -rfv $ROOTFS_DIR/etc/shadow-
+          [ -f $ROOTFS_DIR/var/lib/dpkg/diversions-old ]  && sudo rm -rfv $ROOTFS_DIR/var/lib/dpkg/diversions-old
+          [ -f $ROOTFS_DIR/var/lib/dpkg/status-old ]      && sudo rm -rfv $ROOTFS_DIR/var/lib/dpkg/status-old
+
+      - name: UMOUNT ROOTFS
+        run: |
+          for dir in $(mount | grep "$ROOTFS_DIR/" | awk '{print $3}'); do
+            mount | grep -q "on $dir type" && sudo umount -v --recursive $dir
+          done
+
+      - name: MAKE ARTIFACT
+        run: |
+          sudo apt install --no-install-recommends --no-install-suggests xz-utils -y
+          cd ${{ github.workspace }} && sudo tar --use-compress-program='xz -9' -cvf /tmp/rootfs_${ARCH}.tar.xz $(basename ${ROOTFS_DIR}) > /tmp/rootfs_${ARCH}.tar.txt
+
+      - name: UPLOAD ARTIFACT
+        run: |
+          _title="${CODENAME}-${ARCH}"
+          _resources="/tmp/rootfs_${ARCH}.tar.xz /tmp/rootfs_${ARCH}.tar.txt"
+          gh release delete "$_title" --cleanup-tag --yes || true
+          gh release create "$_title" $_resources --generate-notes --title "$_title"

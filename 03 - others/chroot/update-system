@@ -1,0 +1,92 @@
+#! /bin/bash
+
+[ ! "$(id -u)" -eq 0 ] && printf "Please running script as root" && exit 1
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --rootfs-dir)
+      if [ -z "$2" ]; then
+        echo "Error: Missing value for --rootfs-dir"; exit 1
+      fi
+      ROOTFS_DIR="$2"; shift 2
+      ;;
+    --disk)
+      if [ -z "$2" ]; then
+        echo "Error: Missing value for --disk"; exit 1
+      fi
+      DISK="$2"; shift 2
+      ;;
+    *)
+      echo "Usage: --rootfs-dir /mnt/root_dir --disk /dev/sdxX"; exit 1
+      ;;
+  esac
+done
+
+if [ -z "$ROOTFS_DIR" ]; then
+  printf "Please set arg --rootfs-dir=\n"; exit 1
+fi
+
+if [ "$ROOTFS_DIR" = "/" ]; then
+  printf "Invalid --rootfs-dir=/"; exit 1
+fi
+
+_umount_rootfs_dir() {
+  if [ ! -z "$DISK" ]; then
+    umount -v $ROOTFS_DIR --recursive || exit $?
+    [ -d "$ROOTFS_DIR" ] && [ -z "$(ls -A $ROOTFS_DIR)" ] && rm -rfv $ROOTFS_DIR
+  else
+    for dir in $(mount | grep "$ROOTFS_DIR/" | awk '{print $3}'); do
+      mount | grep -q "on $dir type" && umount -v --recursive $dir
+    done
+  fi
+}
+
+cleanup() {
+  if [ -f "$ROOTFS_DIR/etc/apt/sources.list.bak" ]; then
+    mv --force $ROOTFS_DIR/etc/apt/sources.list.bak $ROOTFS_DIR/etc/apt/sources.list
+  fi
+  _umount_rootfs_dir; exit 1
+}
+trap cleanup SIGINT
+
+if [ ! -z "$DISK" ]; then
+  if ! cat /proc/mounts | grep -qs "$DISK $ROOTFS_DIR"; then
+    mount  -v $DISK $ROOTFS_DIR  --mkdir || exit $?
+  fi
+fi
+
+declare -A dirs
+dirs["dev"]="udev devtmpfs defaults,size=0"
+dirs["dev/pts"]="devpts devpts defaults"
+dirs["home"]="tmpfs tmpfs defaults,size=100%"
+dirs["media"]="tmpfs tmpfs defaults,size=100%"
+dirs["mnt"]="tmpfs tmpfs defaults,size=100%"
+dirs["opt"]="tmpfs tmpfs defaults,size=100%"
+dirs["proc"]="proc proc defaults"
+dirs["root"]="tmpfs tmpfs defaults,size=100%"
+dirs["run"]="tmpfs tmpfs defaults,size=100%"
+dirs["sys"]="sysfs sysfs defaults"
+dirs["tmp"]="tmpfs tmpfs defaults,size=100%"
+dirs["var/cache"]="tmpfs tmpfs defaults,size=100%"
+dirs["var/lib/apt"]="tmpfs tmpfs defaults,size=100%"
+dirs["var/log"]="tmpfs tmpfs defaults,size=100%"
+for dir in ${!dirs[@]}; do
+  _args=(${dirs["$dir"]})
+  _fs="${_args[0]}"
+  _type="${_args[1]}"
+  _options="${_args[2]}"
+  _target="$ROOTFS_DIR/$dir"
+  mount | grep -q "on $_target type $_type" || {
+    mount -v $_fs $_target --types $_type -o $_options || exit $?
+  }
+done
+sudo chroot $ROOTFS_DIR /bin/bash << "EOF_CHROOT"
+cp -rf /etc/apt/sources.list /etc/apt/sources.list.bak
+/var/backups/apt/apt restore
+apt update
+apt upgrade --no-install-suggests --no-install-recommends -y
+#apt install --no-install-suggests --no-install-recommends <package> -y
+[ -f "/etc/apt/sources.list.bak" ] && mv --force /etc/apt/sources.list.bak /etc/apt/sources.list
+EOF_CHROOT
+
+_umount_rootfs_dir

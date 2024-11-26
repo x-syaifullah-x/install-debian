@@ -1,0 +1,29 @@
+#! /bin/bash
+
+[ `id --user` != 0 ] && echo "Must be superuser to use mount." && exit
+#_USER=$(last | sort | grep "still logged in" | awk '{print $1; exit}')
+_USER=xxx
+_LABEL=$2
+_PATH=/media/$_USER/$_LABEL
+
+if [ "$1" = "enable" ]; then
+	if ! grep -qs $_PATH /proc/mounts; then
+		if [[ "$_LABEL" == *"EXFAT" ]]; then
+			mount -v --label=$_LABEL -o uid=$_USER,gid=$_USER $_PATH --mkdir
+		else
+			mount -v --label=$_LABEL $_PATH --mkdir
+		fi
+	fi
+elif [ "$1" = "disable" ]; then
+	for i in $(mount | grep "$_PATH" | awk '{print $3}'); do
+		if [ "$i" != "$_PATH" ]; then
+			umount -v $i --lazy --recursive
+		fi
+	done
+	umount -v $_PATH --lazy --recursive
+	if [ -z "$(ls -A $_PATH)" ]; then
+		rm -rf $_PATH &>/dev/null
+	fi
+else
+    echo "Required args [ enable | disable ]"
+fi

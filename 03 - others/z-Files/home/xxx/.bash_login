@@ -1,0 +1,77 @@
+PATH=$PATH:"${HOME}/.local/bin"
+
+PATH_LINUX_FILE="${HOME}/.files"
+PATH_LINUX_FILE_IDE="$PATH_LINUX_FILE/IDE"
+PATH_LINUX_FILE_SDK="$PATH_LINUX_FILE/SDK"
+
+# FLUTTER SDK CONFIGURATION
+FLUTTER_ROOT="$PATH_LINUX_FILE/SDK/Flutter/flutter"
+PATH=$PATH:$FLUTTER_ROOT/bin
+unset FLUTTER_ROOT
+
+# GO SDK CONFIGURATION
+GO_ROOT="${PATH_LINUX_FILE_SDK}/Go"
+PATH=$PATH:$GO_ROOT/bin
+unset GO_ROOT
+
+# JAVA CONFIGURATION
+export JAVA_HOME="$PATH_LINUX_FILE_SDK/Java"
+PATH=$PATH:$JAVA_HOME/bin
+
+# ANDROID SDK CONFIGURATION
+export ANDROID_HOME="$PATH_LINUX_FILE_SDK/Android"
+PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin
+
+# CMAKE CONFIGURATION
+CMAKE_HOME="$ANDROID_SDK_ROOT/cmake/3.22.1"
+PATH=$PATH:$CMAKE_HOME/bin
+unset CMAKE_HOME
+
+# ANDROID STUDIO CONFIGURATION
+ANDROID_STUDIO_ROOT="$PATH_LINUX_FILE_IDE/android-studio"
+export STUDIO_VM_OPTIONS="${HOME}/.android/studio/bin/studio64.vmoptions"
+export STUDIO_PROPERTIES="${HOME}/.android/studio/bin/idea.properties"
+PATH=$PATH:$ANDROID_STUDIO_ROOT/bin
+unset ANDROID_STUDIO_ROOT
+
+# GRADLE CONFIGURATION
+export GRADLE_USER_HOME="${HOME}/.gradle"
+GRADLE_ROOT="$GRADLE_USER_HOME/wrapper/dists/gradle-8.10-all/3ym48ijgw9iixtry4iwty4ydy/gradle-8.10"
+PATH=$PATH:$GRADLE_ROOT/bin
+unset GRADLE_ROOT
+unset GRADLE_USER_HOME
+
+# NODEJS CONFIGURATION
+NODE_JS_ROOT="$PATH_LINUX_FILE_SDK/Node"
+PATH=$PATH:$NODE_JS_ROOT/bin
+unset NODE_JS_ROOT
+
+# FIREBASE-TOOLS CONFIGURATION
+FIREBASE_TOOLS_ROOT="$PATH_LINUX_FILE/Firebase-tools"
+#[ ! -L $HOME/.cache/firebase ] && ln -s $FIREBASE_TOOLS_ROOT/firebase $HOME/.cache 2>/dev/null
+PATH=$PATH:$FIREBASE_TOOLS_ROOT/node_modules/.bin
+unset FIREBASE_TOOLS_ROOT
+
+#SCRCPY_ROOT_DIR="${PATH_LINUX_FILE}/Scrcpy"
+#if [ -d $SCRCPY_ROOT_DIR ]; then
+#   export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:"$SCRCPY_ROOT_DIR/usr/local/lib/x86_64-linux-gnu"
+#   export ADB=$ANDROID_HOME/platform-tools/adb
+#   ANDROID_SERIAL=
+#   export SCRCPY_SERVER_PATH="$SCRCPY_ROOT_DIR/usr/local/share/scrcpy/scrcpy-server"
+#   export SCRCPY_ICON_PATH="$SCRCPY_ROOT_DIR/usr/local/share/icons/hicolor/256x256/apps/scrcpy.png"
+#	alias scrcpy_STB_B860H="$SCRCPY_ROOT_DIR/usr/local/bin/scrcpy --window-title=Android --window-y=0 --window-x=1366 --shortcut-mod lctrl $@"
+#	alias scrcpy_mi_8="$SCRCPY_ROOT_DIR/usr/local/bin/scrcpy --window-title=Android --stay-awake --window-y=0 --window-x=1366 --power-off-on-close --shortcut-mod lctrl $@"
+#	alias scrcpy_oppo_CPH2483="$SCRCPY_ROOT_DIR/usr/local/bin/scrcpy --window-title=Android --window-y=0 --window-x=1366 --power-off-on-close --shortcut-mod lctrl $@"
+#fi
+#unset SCRCPY_ROOT_DIR
+
+export PATH
+
+unset PATH_LINUX_FILE_IDE
+unset PATH_LINUX_FILE_SDK
+unset PATH_LINUX_FILE
+
+[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
+
+# ALIAS START GNOME SESSION FROM TTY
+alias start-gnome-session="$([ -z "$XDG_DATA_DIRS" ] && XDG_DATA_DIRS=/usr/share/gnome:/usr/local/share/:/usr/share/:${HOME}/.local/share/) VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_hasvk_icd.x86_64.json ELECTRON_OZONE_PLATFORM_HINT=wayland MOZ_ENABLE_WAYLAND=1 QT_QPA_PLATFORM=wayland XDG_SESSION_TYPE=wayland dbus-run-session gnome-session"

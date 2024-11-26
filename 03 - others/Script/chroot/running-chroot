@@ -1,0 +1,104 @@
+#! /bin/bash
+
+[ ! "$(id -u)" -eq 0 ] && printf "Please running script as root" && exit 1
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --rootfs-dir)
+      if [ -z "$2" ]; then
+        echo "Error: Missing value for --rootfs-dir"; exit 1
+      fi
+      ROOTFS_DIR="$2"; shift 2
+      ;;
+    --disk)
+      if [ -z "$2" ]; then
+        echo "Error: Missing value for --disk"; exit 1
+      fi
+      DISK="$2"; shift 2
+      ;;
+    *)
+      echo "Usage: --rootfs-dir /mnt/root_dir --disk /dev/sdxX"; exit 1
+      ;;
+  esac
+done
+
+if [ -z "$ROOTFS_DIR" ]; then
+  printf "Please set arg --rootfs-dir=\n"; exit 1
+fi
+
+if [ "$ROOTFS_DIR" = "/" ]; then
+  printf "Invalid --rootfs-dir=/"; exit 1
+fi
+
+_umount_rootfs_dir() {
+sudo chroot $ROOTFS_DIR /bin/bash << "EOF_CHROOT"
+_sources_list="/etc/apt/sources.list"
+if [ -f "${_sources_list}.bak" ]; then
+  mv -fv "${_sources_list}.bak" "$_sources_list"
+fi
+
+if [ -f "/var/lib/dpkg/status-old" ]; then
+  rm -rfv "/var/lib/dpkg/status-old"
+fi
+
+if [ -f "/var/lib/dpkg/diversions-old" ]; then
+  rm -rfv "/var/lib/dpkg/diversions-old"
+fi
+
+dpkg --clear-avail
+
+_etc_pwd_lock="/etc/.pwd.lock"
+if [ -f "$_etc_pwd_lock" ]; then
+  rm -rfv "$_etc_pwd_lock"
+fi
+EOF_CHROOT
+
+  if [ ! -z "$DISK" ]; then
+    umount -v $ROOTFS_DIR --recursive || exit $?
+    [ -d "$ROOTFS_DIR" ] && [ -z "$(ls -A $ROOTFS_DIR)" ] && rm -rfv $ROOTFS_DIR
+  else
+    for dir in $(mount | grep "$ROOTFS_DIR/" | awk '{print $3}'); do
+      mount | grep -q "on $dir type" && umount -v --recursive $dir
+    done
+  fi
+}
+
+trap _umount_rootfs_dir SIGINT
+
+if [ ! -z "$DISK" ]; then
+  if ! cat /proc/mounts | grep -qs "$DISK $ROOTFS_DIR"; then
+    mount  -v $DISK $ROOTFS_DIR  --mkdir || exit $?
+  fi
+fi
+
+_args=(
+  "dev udev devtmpfs nosuid,mode=0755,size=0"
+  "dev/pts devpts devpts noexec,nosuid,gid=5,mode=0620"
+  "media tmpfs tmpfs defaults,size=100%"
+  "mnt tmpfs tmpfs defaults,size=100%"
+  "opt tmpfs tmpfs defaults,size=100%"
+  "proc proc proc nodev,noexec,nosuid"
+  "root tmpfs tmpfs defaults,size=100%"
+  "run tmpfs tmpfs nodev,noexec,nosuid,mode=0755,size=100%"
+  "run/lock tmpfs tmpfs defaults,nosuid,nodev,noexec,relatime,size=100%,inode64 --mkdir"
+  "sys sysfs sysfs nodev,noexec,nosuid"
+  "tmp ramfs ramfs defaults,nosuid,nodev,noatime,mode=1777"
+  "var/cache tmpfs tmpfs defaults,size=100%"
+  "var/lib/apt tmpfs tmpfs defaults,size=100%"
+  "var/log tmpfs tmpfs defaults,size=100%"
+)
+for _arg in "${_args[@]}"; do
+  aa=($_arg)
+  _target="$ROOTFS_DIR/${aa[0]}"
+  _fs=${aa[1]}
+  _type=${aa[2]}
+  _options=${aa[3]}
+  _mkdir=${aa[4]}
+  mount | grep -q "on $_target type $_type" || {
+    mount -v $_fs $_target --types $_type -o $_options $_mkdir || exit $?
+  }
+done
+
+chroot $ROOTFS_DIR /bin/bash
+
+_umount_rootfs_dir

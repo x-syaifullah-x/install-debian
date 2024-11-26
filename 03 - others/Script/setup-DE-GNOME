@@ -1,0 +1,52 @@
+#!/bin/bash
+
+if [ $(id -u 2>/dev/null) -eq 0 ]; then
+  echo "Do not run this script as root!"; exit 0
+fi
+
+function _install_package {
+	DEBIAN_FRONTEND=noninteractive
+	sudo apt-get update 2>&1 >/dev/null || exit $?
+	sudo apt-get install --no-install-recommends --no-install-suggests $@ -y 2>&1 >/dev/null || exit $?
+}
+
+if [[ -z "$XDG_RUNTIME_DIR" || -z "$DBUS_SESSION_BUS_ADDRESS" ]]; then
+  echo "Install DBus ..."
+  _install_package dbus-user-session
+  export XDG_RUNTIME_DIR=/run/user/$(id -u)
+  sudo systemctl restart dbus
+  sudo loginctl enable-linger $USER
+  ENABLE_LINGER="enable-linger"
+fi
+
+# FIX dbus-daemon[448]: Unknown username "polkitd" in message bus configuration file
+grep -qs polkitd /etc/passwd || cat << EOF | sudo tee -a /etc/passwd 2>&1 >/dev/null
+polkitd:x:997:997:polkit:/nonexistent:/usr/sbin/nologin
+EOF
+
+# FIX dbus-daemon[447]: Unknown username "rtkit" in message bus configuration file
+grep -qs rtkit /etc/passwd || cat << EOF | sudo tee -a /etc/passwd 2>&1 >/dev/null
+rtkit:x:101:106:RealtimeKit,,,:/proc:/usr/sbin/nologin
+EOF
+
+echo "Install xdg-desktop-portal ..."
+_install_package rtkit xdg-desktop-portal
+[ -f "/usr/libexec/xdg-desktop-portal-gnome" ] || systemctl --user restart xdg-desktop-portal.service
+
+_packages=(
+	"at-spi2-core"
+	"gjs"
+	"gnome-session"
+	"gnome-icon-theme"
+	"gnome-terminal"
+	"ibus"
+	"webp-pixbuf-loader"
+	"x11-utils"
+	"pipewire-libcamera"
+)
+echo "Install gnome-session ..."
+_install_package ${_packages[@]}
+
+systemctl --user restart pipewire.socket pipewire-pulse.socket
+
+echo "Install success ..."

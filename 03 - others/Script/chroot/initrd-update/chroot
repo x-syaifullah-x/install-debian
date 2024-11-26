@@ -1,0 +1,214 @@
+#!/bin/bash
+
+if [ $(id -u 2>/dev/null) -ne 0 ]; then
+	echo "Please running script as user root"; exit 0
+fi
+
+### PARSE ARGS
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--rootfs-dir)
+			if [ -z "$2" ]; then
+				echo "Error: Missing value for --rootfs-dir"; exit 1
+			fi
+			ROOT_DIR="$2"; shift 2
+			;;
+		--disk)
+			if [ -z "$2" ]; then
+			  echo "Error: Missing value for --disk"; exit 1
+			fi
+			DISK="$2"; shift 2
+			;;
+		*)
+			echo "Usage: --rootfs-dir /mnt/dir --disk /dev/sdxX"; exit 1
+			;;
+	esac
+done
+
+### ROOT_DIR
+if [ -z "$ROOT_DIR" ]; then
+	printf "Please set arg --rootfs-dir=\n"; exit 1
+fi
+if [ "$ROOT_DIR" = "/" ]; then
+	printf "Invalid --rootfs-dir=/"; exit 1
+fi
+
+### CHECK DISK
+if [ ! -z "$DISK" ]; then
+	if ! cat /proc/mounts | grep -qs "$DISK $ROOT_DIR"; then
+		mount  -v $DISK $ROOT_DIR  --mkdir || exit $?
+	fi
+fi
+
+### MOUNTS
+echo "Mount FS ..."
+declare -A dirs
+dirs["dev"]="udev devtmpfs defaults,size=0"
+dirs["dev/pts"]="devpts devpts defaults"
+dirs["proc"]="proc proc defaults"
+dirs["sys"]="sysfs sysfs defaults"
+dirs["tmp"]="ramfs ramfs defaults,nosuid,nodev,noatime,mode=1777"
+for dir in ${!dirs[@]}; do
+	_args=(${dirs["$dir"]})
+	_device="${_args[0]}"
+	_type="${_args[1]}"
+	_options="${_args[2]}"
+	_target="$ROOT_DIR/$dir"
+	mount | grep -q "on $_target type $_type" || {
+		mount $_device --types $_type -o $_options $_target || exit $?
+	}
+done
+ROOT_DIR_OVERLAY=/run/x-rootfs_overlay
+[ -d $ROOT_DIR_OVERLAY ] && echo "$ROOT_DIR_OVERLAY already exist" exit 1
+for dir in etc media mnt opt run tmp home root usr var; do
+	LOWER_DIR=$ROOT_DIR/$dir
+	UPPER_DIR=$ROOT_DIR_OVERLAY/upper_dir/$dir
+	WORK_DIR=$ROOT_DIR_OVERLAY/work_dir/$dir
+	TARGET_DIR=$ROOT_DIR/$dir
+	mkdir -p $UPPER_DIR $WORK_DIR || exit $?
+	mount none --types overlay -o rw,noatime,lowerdir=$LOWER_DIR,upperdir=$UPPER_DIR,workdir=$WORK_DIR $TARGET_DIR || exit $?
+done
+
+### FILESYSTEM ROOT
+FILE_SYSTEM_TYPE=f2fs
+
+### SETUP MODULES
+echo "Create Module ..."
+cat << EOF_ETC_INITRAMFS-TOOLS_MODULES > $ROOT_DIR/etc/initramfs-tools/modules
+$FILE_SYSTEM_TYPE
+raid0
+overlay
+md_mod
+sd_mod
+ahci
+libahci
+xhci_pci
+libata
+xhci_hcd
+ehci_pci
+ehci_hcd
+scsi_mod
+usbcore
+i2c_i801
+crc32c_intel
+lpc_ich
+video
+scsi_common
+i2c_smbus
+usb_common
+battery
+swmi
+### AUTOLOAD
+#crc32_generic
+#crc32_pclmul
+#lz4hc_compress
+#lz4_compress
+#psmouse
+EOF_ETC_INITRAMFS-TOOLS_MODULES
+cat $ROOT_DIR/etc/initramfs-tools/modules
+
+### SETUP INITRANFS CONF
+echo "Create Initramfs Conf"
+cat << EOF_ETC_INITRAMFS-TOOLS_INTIRAMFS.CONF > $ROOT_DIR/etc/initramfs-tools/initramfs.conf
+MODULES=list
+BUSYBOX=n
+KEYMAP=n
+COMPRESS=lz4
+COMPRESSLEVEL=9
+DEVICE=
+NFSROOT=auto
+RUNSIZE=100%
+FSTYPE=$FILE_SYSTEM_TYPE
+EOF_ETC_INITRAMFS-TOOLS_INTIRAMFS.CONF
+cat $ROOT_DIR/etc/initramfs-tools/initramfs.conf
+
+CURRENT_DIR="/$(realpath --relative-to=/ $(dirname $0))"
+
+### COPY MY INIT SCRIPT
+cp -rfv $CURRENT_DIR/init $ROOT_DIR/usr/share/initramfs-tools/init
+chmod -v +x $ROOT_DIR/usr/share/initramfs-tools/init
+
+### SETUP IO SCHEDULER
+echo "Create IO Scheduler"
+cat << EOF_CONTENT > $ROOT_DIR/etc/udev/rules.d/io-scheduler.rules
+ACTION=="add|change", KERNEL=="sd[a-z]|mmcblk[0-9]*|nvme[0-9]n[0-9]", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="none"
+EOF_CONTENT
+cat $ROOT_DIR/etc/udev/rules.d/io-scheduler.rules
+
+### RUNNING CHROOT
+sudo chroot $ROOT_DIR /bin/bash << "EOF"
+
+### RESTORE APT DATA
+#APT_DATA=/var/backups/apt/apt
+#if [ -f $APT_DATA ]; then
+#	echo "Restore APT Data ..."
+#	$APT_DATA restore 2>&1 >/dev/null
+#fi
+
+### INSTALL PACKAGES
+echo "Update Packages ..."
+export DEBIAN_FRONTEND="noninteractive"
+apt-get update 2>&1 >/dev/null
+eval $(cat /etc/initramfs-tools/initramfs.conf)
+export package="$COMPRESS wireless-regdb"
+grep -qs "raid" /proc/mdstat && package="$package mdadm"
+case "$FSTYPE" in
+	f2fs)
+		package="$package f2fs-tools"
+	;;
+	ext4)
+		package="$package e2fsprogs"
+	;;
+	*)
+	  echo "FSTYPE not set !"
+	;;
+esac
+echo "Install Packages $package ..."
+apt-get install --no-install-suggests --no-install-recommends $package -y 2>&1 >/dev/null || exit $?
+
+### SETUP MDADM
+if [ "$(echo $package | grep  mdadm)" ]; then
+echo "Setup mdadm conf ..."
+cat << EOF_ETC_MDADM_MDADM.CONF > /etc/mdadm/mdadm.conf
+HOMEHOST <system>
+MAILADDR root
+$(mdadm --detail --scan /dev/md0)
+EOF_ETC_MDADM_MDADM.CONF
+cat /etc/mdadm/mdadm.conf
+
+echo "Fix /usr/share/initramfs-tools/scripts/local-bottom/mdadm"
+cat << EOF_LOCAL_BOTTOM_MDADM > /usr/share/initramfs-tools/scripts/local-bottom/mdadm
+#!/bin/sh
+[ -f /run/count.mdadm.initrd ] && rm -f /run/count.mdadm.initrd
+exit 0
+EOF_LOCAL_BOTTOM_MDADM
+cat /usr/share/initramfs-tools/scripts/local-bottom/mdadm
+#### Remove module linear multipath raid1 raid456 raid5 raid6 raid10
+echo "Remove modules linear multipath raid0 raid1 raid456 raid5 raid6 raid10 in /usr/share/initramfs-tools/hooks/mdadm"
+sed -i -e 's/force_load \$module/true/' /usr/share/initramfs-tools/hooks/mdadm
+### Remove module efivarfs
+echo "Remove modules efivarfs in /usr/share/initramfs-tools/hooks/mdadm"
+sed -i -e 's/force_load efivarfs/true/' /usr/share/initramfs-tools/hooks/mdadm
+fi
+### UPDATE INITRAMFS
+echo "update-initramfs -v -d -c -k all"
+update-initramfs -v -d -c -k all 2>&1 >/dev/null
+EOF
+
+_umount_rootfs_dir() {
+  _ETC_PWD_LOCK="$ROOT_DIR/etc/.pwd.lock"
+  [ -f "$_ETC_PWD_LOCK" ] && rm -rfv "$_ETC_PWD_LOCK"
+
+	if [ ! -z "$DISK" ]; then
+		umount -v --recursive $ROOT_DIR || exit $?
+		[ -d "$ROOT_DIR" ] && [ -z "$(ls -A $ROOT_DIR)" ] && rm -rf $ROOT_DIR
+	else
+		for dir in $(mount | grep "$ROOT_DIR/" | awk '{print $3}'); do
+			mount | grep -q "on $dir type" && umount -v --recursive $dir
+		done
+	fi
+
+	[ -d $ROOT_DIR_OVERLAY ] && rm -rf $ROOT_DIR_OVERLAY
+}
+
+_umount_rootfs_dir

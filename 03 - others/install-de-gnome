@@ -1,0 +1,42 @@
+#!/bin/bash
+
+if [ $(id -u 2>/dev/null) -eq 0 ]; then
+  echo "Please don't running as user root"; exit 0
+fi
+
+# FIX dbus-daemon[448]: Unknown username "polkitd" in message bus configuration file
+grep -qs polkitd /etc/passwd || cat << EOF | sudo tee -a /etc/passwd 2>&1 >/dev/null
+polkitd:x:997:997:polkit:/nonexistent:/usr/sbin/nologin
+EOF
+
+# FIX dbus-daemon[447]: Unknown username "rtkit" in message bus configuration file
+grep -qs rtkit /etc/passwd || cat << EOF | sudo tee -a /etc/passwd 2>&1 >/dev/null
+rtkit:x:101:106:RealtimeKit,,,:/proc:/usr/sbin/nologin
+EOF
+
+function _install_package {
+	DEBIAN_FRONTEND=noninteractive
+	sudo apt-get update 2>&1 >/dev/null || exit $?
+	sudo apt-get install --no-install-recommends --no-install-suggests $@ -y 2>&1 >/dev/null || exit $?
+}
+
+echo "Install packages ..."
+_install_package polkitd rtkit xdg-desktop-portal
+[ -f "/usr/libexec/xdg-desktop-portal-gnome" ] || systemctl --user restart xdg-desktop-portal.service
+
+_packages=(
+	"at-spi2-core"
+	"gjs"
+	"gnome-session"
+	"gnome-icon-theme"
+	"gnome-terminal"
+	"ibus"
+	"webp-pixbuf-loader"
+	"x11-utils"
+	"pipewire-libcamera"
+)
+_install_package ${_packages[@]}
+
+systemctl --user restart pipewire.socket pipewire-pulse.socket
+
+echo "Install success ..."

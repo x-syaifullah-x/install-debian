@@ -1,0 +1,14 @@
+#!/bin/sh
+
+if [ $(id -u 2>/dev/null) -ne 0 ]; then
+	echo "Please running as root ..."
+	exit 0
+fi
+
+_log_dir="/var/log"
+_dpkg_log="$_log_dir/dpkg.log"
+_packages="$(cat $_dpkg_log 2>/dev/null | grep " install " | awk '{print $4}')"
+apt remove --purge --allow-remove-essential $_packages -y
+if [ $? -eq 0 ]; then
+	rm -rfv "$_log_dir/apt" "$_dpkg_log" "$_log_dir/alternatives.log"
+fi

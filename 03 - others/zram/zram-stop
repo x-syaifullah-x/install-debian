@@ -1,0 +1,12 @@
+#! /bin/sh
+
+. "$(dirname $0)/zram.properties"
+
+COUNT=`expr $NUM_DEVICES - 1`
+for i in `seq 0 $COUNT`; do
+    swapoff /dev/zram$i
+    echo 1 > /sys/block/zram$i/reset
+    sleep .5
+done
+
+modprobe -r zram

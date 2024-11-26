@@ -1,0 +1,49 @@
+#! /bin/bash
+
+export DEBIAN_FRONTEND=noninteractive
+
+# INSTALL QEMU-SYSTEM
+if [ ! -x "$(command -v qemu-system-x86_64)" ]; then
+  echo "Install qemu-system-x86_64 ..."
+  sudo apt install --no-install-suggests --no-install-recommends ovmf qemu-system-x86 qemu-system-gui -y || exit $?
+fi
+
+# ENVIRONMET VARIABLE
+MACHINE_NAME="Debian-12"
+QEMU_ROOT_DIR="/$(realpath --relative-to=/ $(dirname $0))"
+QEMU_RESOURCES="$QEMU_ROOT_DIR/Resources"
+[ ! -d "$QEMU_RESOURCES" ] && (mkdir -pv $QEMU_RESOURCES || exit $?)
+SSH_PORT="5555"
+OVMF_CODE="/usr/share/OVMF/OVMF_CODE_4M.ms.fd"
+OVMF_VARS_ORIG="/usr/share/OVMF/OVMF_VARS_4M.ms.fd"
+OVMF_VARS="$QEMU_RESOURCES/bios"
+if [ ! -e "$OVMF_VARS" ]; then
+  cp -rfv "$OVMF_VARS_ORIG" "${OVMF_VARS}"
+fi
+
+# sudo usermod -aG plugdev xxx
+args=(
+  -enable-kvm
+  -machine q35,smm=on
+  -cpu host,kvm=on
+  -smp $(nproc)
+  -m $((1024 * 2))
+  -object rng-random,filename=/dev/urandom,id=rng0
+  -boot order=c,menu=on # f2 enter to bios
+  -device virtio-rng-pci,rng=rng0
+  -name "${MACHINE_NAME}"
+  -net nic,model=virtio
+  -net user,hostfwd=tcp::${SSH_PORT}-:22
+  -global driver=cfi.pflash01,property=secure,value=on
+  -drive if=pflash,format=raw,unit=0,file="${OVMF_CODE}",readonly=on
+  -drive if=pflash,format=raw,unit=1,file="${OVMF_VARS}"
+  -rtc base=localtime
+  -drive file=/dev/ram0,format=raw
+  -kernel /boot/vmlinuz-$(uname -r)
+  -initrd /mnt/initrd.img-$(uname -r)
+  -append "quiet"
+  -device virtio-vga-gl
+  -display gtk,gl=on
+  -monitor stdio
+)
+qemu-system-x86_64 "${args[@]}"

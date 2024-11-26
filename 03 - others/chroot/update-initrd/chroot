@@ -1,0 +1,225 @@
+#!/bin/bash
+
+[ ! "$(id -u)" -eq 0 ] && printf "Please running script as user root" && exit 1
+
+### PARSE ARGS
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--rootfs-dir)
+			if [ -z "$2" ]; then
+				echo "Error: Missing value for --rootfs-dir"; exit 1
+			fi
+			ROOT_DIR="$2"; shift 2
+			;;
+		--disk)
+			if [ -z "$2" ]; then
+			  echo "Error: Missing value for --disk"; exit 1
+			fi
+			DISK="$2"; shift 2
+			;;
+		*)
+			echo "Usage: --rootfs-dir /mnt/dir --disk /dev/sdxX"; exit 1
+			;;
+	esac
+done
+
+### ROOT_DIR
+if [ -z "$ROOT_DIR" ]; then
+	printf "Please set arg --rootfs-dir=\n"; exit 1
+fi
+if [ "$ROOT_DIR" = "/" ]; then
+	printf "Invalid --rootfs-dir=/"; exit 1
+fi
+
+### CHECK DISK
+if [ ! -z "$DISK" ]; then
+	if ! cat /proc/mounts | grep -qs "$DISK $ROOT_DIR"; then
+		mount  -v $DISK $ROOT_DIR  --mkdir || exit $?
+	fi
+fi
+
+### MOUNTS
+echo "Mount FS ..."
+declare -A dirs
+dirs["dev"]="udev devtmpfs defaults,size=0"
+dirs["dev/pts"]="devpts devpts defaults"
+dirs["media"]="tmpfs tmpfs defaults,size=100%"
+dirs["mnt"]="tmpfs tmpfs defaults,size=100%"
+dirs["opt"]="tmpfs tmpfs defaults,size=100%"
+dirs["proc"]="proc proc defaults"
+dirs["run"]="tmpfs tmpfs defaults,size=100%"
+dirs["sys"]="sysfs sysfs defaults"
+dirs["tmp"]="tmpfs tmpfs defaults,size=100%"
+for dir in ${!dirs[@]}; do
+	_args=(${dirs["$dir"]})
+	_fs="${_args[0]}"
+	_type="${_args[1]}"
+	_options="${_args[2]}"
+	_target="$ROOT_DIR/$dir"
+	mount | grep -q "on $_target type $_type" || {
+		mount $_fs $_target --types $_type -o $_options || exit $?
+	}
+done
+ROOT_DIR_OVERLAY=/run/rootfs_overlay
+[ -d $ROOT_DIR_OVERLAY ] && echo "$ROOT_DIR_OVERLAY already exist" exit 1
+for dir in etc home root usr var; do
+	LOWER_DIR=$ROOT_DIR/$dir
+	UPPER_DIR=$ROOT_DIR_OVERLAY/upper_dir/$dir
+	WORK_DIR=$ROOT_DIR_OVERLAY/work_dir/$dir
+	TARGET_DIR=$ROOT_DIR/$dir
+	mkdir -p $UPPER_DIR $WORK_DIR || exit $?
+	mount none --types overlay $TARGET_DIR -o rw,noatime,nodiratime,lowerdir=$LOWER_DIR,upperdir=$UPPER_DIR,workdir=$WORK_DIR || exit $?
+done
+
+### FILESYSTEM ROOT
+FILE_SYSTEM=$(cat /etc/fstab | grep -i " / " | awk '{ print $3}')
+
+### SETUP MODULES
+echo "Create Module ..."
+cat << EOF_ETC_INITRAMFS-TOOLS_MODULES > $ROOT_DIR/etc/initramfs-tools/modules
+$FILE_SYSTEM
+crc32_generic
+lz4hc_compress
+lz4_compress
+overlay
+md_mod
+sd_mod
+ahci
+libahci
+xhci_pci
+libata
+xhci_hcd
+ehci_pci
+ehci_hcd
+scsi_mod
+usbcore
+psmouse
+crc32_pclmul
+i2c_i801
+crc32c_intel
+lpc_ich
+video
+scsi_common
+i2c_smbus
+usb_common
+battery
+wmi
+EOF_ETC_INITRAMFS-TOOLS_MODULES
+cat $ROOT_DIR/etc/initramfs-tools/modules
+
+### SETUP INITRANFS CONF
+echo "Create Initramfs Conf"
+cat << EOF_ETC_INITRAMFS-TOOLS_INTIRAMFS.CONF > $ROOT_DIR/etc/initramfs-tools/initramfs.conf
+MODULES=list
+BUSYBOX=n
+KEYMAP=n
+COMPRESS=lz4
+COMPRESSLEVEL=9
+DEVICE=
+NFSROOT=auto
+RUNSIZE=100%
+FSTYPE=$FILE_SYSTEM
+EOF_ETC_INITRAMFS-TOOLS_INTIRAMFS.CONF
+cat $ROOT_DIR/etc/initramfs-tools/initramfs.conf
+
+CURRENT_DIR="/$(realpath --relative-to=/ $(dirname $0))"
+
+### COPY MY INIT SCRIPT
+cp -rfv $CURRENT_DIR/init $ROOT_DIR/usr/share/initramfs-tools/init
+chmod -v +x $ROOT_DIR/usr/share/initramfs-tools/init
+
+### SETUP IO SCHEDULER
+echo "Create IO Scheduler"
+cat << EOF_CONTENT > $ROOT_DIR/etc/udev/rules.d/io-scheduler.rules
+ACTION=="add|change", KERNEL=="sd[a-z]|mmcblk[0-9]*|nvme[0-9]n[0-9]", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="none"
+EOF_CONTENT
+cat $ROOT_DIR/etc/udev/rules.d/io-scheduler.rules
+
+### RUNNING CHROOT
+sudo chroot $ROOT_DIR /bin/bash << "EOF"
+
+### RESTORE APT DATA
+APT_DATA=/var/backups/apt/restore
+if [ -f $APT_DATA ]; then
+	echo "Restore APT Data ..."
+	$APT_DATA 2>&1 >/dev/null
+fi
+
+### INSTALL PACKAGES
+echo "Update Packages ..."
+export DEBIAN_FRONTEND="noninteractive"
+apt-get update 2>&1 >/dev/null
+eval $(cat /etc/initramfs-tools/initramfs.conf | grep COMPRESS=)
+export package="$COMPRESS"
+grep -qs "raid" /proc/mdstat && package="$package mdadm"
+export FILE_SYSTEM=$(cat /etc/fstab | grep -i " / " | awk '{ print $3}')
+case "$FILE_SYSTEM" in
+	f2fs)
+		package="$package f2fs-tools"
+	;;
+	ext4)
+		package="$package e2fsprogs"
+	;;
+esac
+echo "Install Packages $package ..."
+apt-get install --no-install-suggests --no-install-recommends $package -y 2>&1 >/dev/null || exit $?
+
+### SETUP MDADM
+if [ "$(echo $package | grep  mdadm)" ]; then
+echo "Setup mdadm conf ..."
+cat << EOF_ETC_MDADM_MDADM.CONF > /etc/mdadm/mdadm.conf
+HOMEHOST <system>
+MAILADDR root
+$(mdadm --detail --scan /dev/md0)
+EOF_ETC_MDADM_MDADM.CONF
+cat /etc/mdadm/mdadm.conf
+
+echo "Fix /usr/share/initramfs-tools/scripts/local-bottom/mdadm"
+cat << EOF_LOCAL_BOTTOM_MDADM > /usr/share/initramfs-tools/scripts/local-bottom/mdadm
+#!/bin/sh
+[ -f /run/count.mdadm.initrd ] && rm -f /run/count.mdadm.initrd
+exit 0
+EOF_LOCAL_BOTTOM_MDADM
+cat /usr/share/initramfs-tools/scripts/local-bottom/mdadm
+#### Remove module linear multipath raid1 raid456 raid5 raid6 raid10
+echo "Remove modules linear multipath raid1 raid456 raid5 raid6 raid10 in /usr/share/initramfs-tools/hooks/mdadm"
+sed -i -e 's/linear multipath raid0 raid1 raid456 raid5 raid6 raid10/raid0/' /usr/share/initramfs-tools/hooks/mdadm
+### Remove module efivarfs
+echo "Remove modules efivarfs in /usr/share/initramfs-tools/hooks/mdadm"
+sed -i -e 's/force_load efivarfs || true//' /usr/share/initramfs-tools/hooks/mdadm
+fi
+### UPDATE INITRAMFS
+echo "update-initramfs -v -d -c -k all"
+update-initramfs -v -d -c -k all 2>&1 >/dev/null
+
+### SETUP GRUB
+echo "Update Config Grub ..."
+GRUB_DIR=/boot/grub
+[ ! -d $GRUB_DIR ] && mkdir -pv $GRUB_DIR
+cat << EOF_BOOT_GRUB__GRUB.CFG > $GRUB_DIR/grub.cfg
+set default='0'
+set timeout=0
+set pager=1
+set gfxpayload=keep
+menuentry 'Debian $(cat /etc/debian_version)' {
+	echo 'Please wait a moment ...'
+	linux /boot/vmlinuz-$(uname -r) root=$(cat /etc/fstab | grep -i " / " | awk '{ print $1}') ro quiet consoleblank=180 loglevel=0 net.ifnames=0 mitigations=off modprobe.blacklist=at24,efi_pstore,uas,usb_storage,uvcvideo,r8169,b43,bcma,brcmsmac,iTCO_wdt acpi_enforce_resources=no reboot=pci acpi_osi=Linux nmi_watchdog=0 fsck.mode=skip
+	initrd /boot/initrd.img-$(uname -r)
+}
+EOF_BOOT_GRUB__GRUB.CFG
+cat $GRUB_DIR/grub.cfg
+EOF
+
+_umount_rootfs_dir() {
+	if [ ! -z "$DISK" ]; then
+		umount -v --recursive $ROOT_DIR || exit $?
+		[ -d "$ROOT_DIR" ] && [ -z "$(ls -A $ROOT_DIR)" ] && rm -rf $ROOT_DIR
+	else
+		for dir in $(mount | grep "$ROOT_DIR/" | awk '{print $3}'); do
+			mount | grep -q "on $dir type" && umount -v --recursive $dir
+		done
+	fi
+	[ -d $ROOT_DIR_OVERLAY ] && rm -rf $ROOT_DIR_OVERLAY
+}
+
+_umount_rootfs_dir

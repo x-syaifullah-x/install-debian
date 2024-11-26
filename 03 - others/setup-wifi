@@ -1,0 +1,10 @@
+#!/bin/sh
+
+if [ $(id -u 2>/dev/null) -ne 0 ]; then
+	echo "Please running as root ..."
+	exit 0
+fi
+
+apt-get update 2>&1 >/dev/null || exit $?
+apt-get install --no-install-recommends --no-install-suggests firmware-brcm80211 wireless-regdb wpasupplicant -y 2>&1 >/dev/null || exit $?
+modprobe --verbose brcmsmac || exit $?
