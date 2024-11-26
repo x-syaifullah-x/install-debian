@@ -1,0 +1,2 @@
+[console_scripts]
+adbsync = BetterADBSync:main

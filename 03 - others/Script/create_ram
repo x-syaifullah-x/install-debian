@@ -1,0 +1,28 @@
+#!/bin/sh
+
+if [ $(id --user) != 0 ]; then
+	echo "Please run as root !!!"
+	exit 127
+fi
+
+modprobe -v brd -r || exit $?
+s_kb="$(cat /proc/meminfo | head -1 | awk '{ print $2 }')"
+modprobe -v brd rd_nr=1 rd_size=$s_kb
+unset s_kb
+r_path="/dev/ram0"
+r_label=$(echo "$r_path" | sed "s/\/dev\/ram/ram\-/g")
+case "$1" in
+	ext4)
+		mkfs.ext4 -v -m 0 -O ^has_journal -L $r_label $r_path -F
+		tune2fs $r_path -o discard,journal_data_writeback,nobarrier
+		e2fsck $r_path -f && e2fsck $r_path -F
+		;;
+	f2fs)
+		mkfs.f2fs -l $r_label $r_path -f
+		;;
+	*)
+		echo "Usage: ext4 | f2fs"
+		;;
+esac
+unset r_path
+unset r_label
