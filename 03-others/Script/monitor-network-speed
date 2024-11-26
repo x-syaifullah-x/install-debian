@@ -1,0 +1,18 @@
+#!/bin/bash
+
+interface="${1:-wlan1}"
+
+grep -q "^[[:space:]]*${interface}:" /proc/net/dev || {
+    echo "Interface ${interface} does not exist."
+    exit 127
+}
+
+
+while true; do
+	read RX1 TX1 < <(grep "$interface" /proc/net/dev | awk '{print $2, $10}')
+	sleep 1
+	read RX2 TX2 < <(grep "$interface" /proc/net/dev | awk '{print $2, $10}')
+	RX_RATE=$((RX2 - RX1))
+	TX_RATE=$((TX2 - TX1))
+	echo "Download: $((RX_RATE / 1024)) KB/s, Upload: $((TX_RATE / 1024)) KB/s"
+done

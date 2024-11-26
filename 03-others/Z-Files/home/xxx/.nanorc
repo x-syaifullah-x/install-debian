@@ -1,0 +1,8 @@
+bind ^Z suspend main
+set   autoindent
+unset historylog
+set   nohelp
+set   nonewlines
+set   tabsize 4
+set   tabstospaces
+set   zero

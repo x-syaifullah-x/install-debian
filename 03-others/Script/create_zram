@@ -1,0 +1,60 @@
+#!/bin/sh
+
+if [ $(id --user) != 0 ]; then
+	echo "Please run as root !!!"
+	exit 127
+fi
+
+c_zram=$(modprobe -v zram || exit $?)
+n=0
+if [ -z "$c_zram" ]; then
+	if [ "$(cat /sys/block/zram${n}/initstate 2>/dev/null)" -eq 1 ]; then
+		n=$(cat /sys/class/zram-control/hot_add || exit $?)
+	fi
+fi
+p_sys_block_zram_x="/sys/block/zram${n}"
+_algo="zstd"
+echo "$_algo" > "$p_sys_block_zram_x/comp_algorithm"
+echo 0 > "$p_sys_block_zram_x/mem_limit"
+z_path="/dev/zram${n}"
+z_label=$(echo $z_path | sed "s/\/dev\/zram/zram\-/g")
+
+mem_total_byte=$(($(cat /proc/meminfo | head -1 | awk '{ print $2 }') * 1024))
+
+case "$1" in
+	swap)
+		s_byte="$(($mem_total_byte / 2))"
+		echo $s_byte > "$p_sys_block_zram_x/disksize"
+		unset s_byte
+		echo 1 > /proc/sys/vm/swappiness
+		mkswap $z_path --label $z_label
+		swapon $z_path -p 100 -v
+		;;
+	f2fs)
+		echo $mem_total_byte > "$p_sys_block_zram_x/disksize"
+		mkfs.f2fs -l $z_label $z_path -f || {
+			echo $n > /sys/class/zram-control/hot_remove
+			[ -z "$c_zram" ] || modprobe -r zram
+		}
+		;;
+	ext4)
+		echo $mem_total_byte > "$p_sys_block_zram_x/disksize"
+		mkfs.ext4 -v -m 0 -O ^has_journal,^metadata_csum -L $z_label $z_path -F || {
+			echo $n > /sys/class/zram-control/hot_remove
+			[ -z "$c_zram" ] || modprobe -r zram
+		}
+		tune2fs $z_path -o discard,journal_data_writeback,nobarrier
+		e2fsck $z_path -f && e2fsck $z_path -F
+		;;
+	*)
+		echo $mem_total_byte > "$p_sys_block_zram_x/disksize"
+		echo "/dev/zram$n Created"
+		# echo $n > /sys/class/zram-control/hot_remove
+		# [ -z "$c_zram" ] || modprobe -r zram
+		# echo "Usage: swap | f2fs | ext4"
+		;;
+esac
+unset mem_total_byte
+unset p_sys_block_zram_x
+unset z_path
+unset z_label
