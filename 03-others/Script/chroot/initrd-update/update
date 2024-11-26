@@ -1,0 +1,464 @@
+#!/bin/bash
+
+FILE_SYSTEM_TYPE=${FILE_SYSTEM_TYPE:-ext4}
+COMPRESS=${COMPRESS:-lz4}
+COMPRESSLEVEL=1
+
+CURRENT_DIR="/$(realpath --relative-to=/ $(dirname $0))"
+
+### INSTALL PACKAGES
+echo "Install Packages $package ..."
+export DEBIAN_FRONTEND="noninteractive"
+apt-get update || exit 127
+
+export package="initramfs-tools"
+
+case "$COMPRESS" in
+	lz4)
+		package="$package lz4"
+	;;
+	zstd)
+		package="$package zstd"
+	;;
+esac
+
+grep -qs "raid" /proc/mdstat && package="$package mdadm"
+
+case "$FILE_SYSTEM_TYPE" in
+	f2fs)
+		package="$package f2fs-tools"
+		ROOTFLAGS="-o rw,noatime,gc_merge,fastboot"
+	;;
+	ext4)
+		package="$package e2fsprogs"
+		ROOTFLAGS="-o rw,noatime,errors=remount-ro,barrier=0"
+	;;
+	btrfs)
+    package="$package btrfs-progs"
+    ROOTFLAGS="-o rw,noatime"
+  ;;
+	xfs)
+    package="$package xfsprogs"
+    ROOTFLAGS="-o rw,noatime,largeio,allocsize=128k,logbsize=256k"
+  ;;
+esac
+
+apt install --no-install-suggests --no-install-recommends $package || exit 127
+
+### SETUP INITRANFS CONF
+echo "Create Initramfs Conf"
+cat << EOF_ETC_INITRAMFS-TOOLS_INTIRAMFS.CONF > /etc/initramfs-tools/initramfs.conf
+MODULES=list
+BUSYBOX=n
+KEYMAP=n
+COMPRESS=$COMPRESS
+COMPRESSLEVEL=$COMPRESSLEVEL
+DEVICE=
+NFSROOT=auto
+RUNSIZE=100%
+FSTYPE=$FILE_SYSTEM_TYPE
+ROOT=/dev/md0
+ROOTFLAGS="$ROOTFLAGS"
+ROOTFSTYPE=\$FSTYPE
+EOF_ETC_INITRAMFS-TOOLS_INTIRAMFS.CONF
+
+. /etc/initramfs-tools/initramfs.conf
+
+### SETUP MODULES
+#echo "Add kernel modules ..."
+#cat << EOF_ETC_INITRAMFS-TOOLS_MODULES > /etc/initramfs-tools/modules
+#$FSTYPE
+#raid0
+#overlay
+#md_mod
+#sd_mod
+#ahci
+#libahci
+#xhci_pci
+#libata
+#xhci_hcd
+#ehci_pci
+#ehci_hcd
+#scsi_mod
+#usbcore
+#i2c_i801
+#crc32c_intel
+#lpc_ich
+#video
+#scsi_common
+#i2c_smbus
+#usb_common
+#battery
+#swmi
+
+### REQUIRED FOR PLYMOUTH
+#i915
+
+### AUTOLOAD
+#crc32_generic
+#crc32_pclmul
+#lz4hc_compress
+#lz4_compress
+#psmouse
+#EOF_ETC_INITRAMFS-TOOLS_MODULES
+
+### MODPROBE
+#echo "Create options i915 conf"
+#cat << EOF_I915_CONF > /etc/modprobe.d/i915.conf
+#options i915 enable_psr=0
+#EOF_I915_CONF
+
+### SETUP IO SCHEDULER
+echo "Create IO Scheduler"
+cat << EOF_CONTENT > /etc/udev/rules.d/io-scheduler.rules
+ACTION=="add|change", KERNEL=="sd[a-z]|mmcblk[0-9]*|nvme[0-9]n[0-9]", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="none"
+EOF_CONTENT
+
+### SETUP MDADM
+if [ "$(echo $package | grep  mdadm)" ]; then
+echo "Setup mdadm conf ..."
+[ -f /etc/mdadm/mdadm.conf ] && cat << EOF_ETC_MDADM_MDADM.CONF > /etc/mdadm/mdadm.conf
+HOMEHOST <system>
+MAILADDR root
+$(mdadm --detail --scan /dev/md0)
+EOF_ETC_MDADM_MDADM.CONF
+
+echo "Fix /usr/share/initramfs-tools/scripts/local-bottom/mdadm"
+[ -f /usr/share/initramfs-tools/scripts/local-bottom/mdadm ] && cat << EOF_LOCAL_BOTTOM_MDADM > /usr/share/initramfs-tools/scripts/local-bottom/mdadm
+#!/bin/sh
+[ -f /run/count.mdadm.initrd ] && rm -f /run/count.mdadm.initrd
+exit 0
+EOF_LOCAL_BOTTOM_MDADM
+
+#### Remove module linear multipath raid1 raid456 raid5 raid6 raid10
+echo "Remove modules linear multipath raid0 raid1 raid456 raid5 raid6 raid10 in /usr/share/initramfs-tools/hooks/mdadm"
+sed -i -e 's/force_load \$module/true/' /usr/share/initramfs-tools/hooks/mdadm
+### Remove module efivarfs
+echo "Remove modules efivarfs in /usr/share/initramfs-tools/hooks/mdadm"
+sed -i -e 's/force_load efivarfs/true/' /usr/share/initramfs-tools/hooks/mdadm
+fi
+
+_hooks_dir="/etc/initramfs-tools/hooks"
+cat << "EOF_HOOKS_DIR" > $_hooks_dir/x-hook.sh
+#!/bin/sh
+. /etc/initramfs-tools/initramfs.conf
+if [ "$MODULES" = "list" ]; then
+	rm -rfv $DESTDIR/conf/modules
+fi
+#cp -rfv $(which cpio) $DESTDIR/bin/ || true
+
+rm -rfv $DESTDIR/conf/conf.d/root
+
+mkdir -pv -m 0755 $DESTDIR/dev
+mkdir -pv -m 0700 $DESTDIR/root
+mkdir -pv $DESTDIR/sys
+mkdir -pv $DESTDIR/proc
+mkdir -pv $DESTDIR/tmp
+mkdir -pv $DESTDIR/var/lock
+EOF_HOOKS_DIR
+chmod +x $_hooks_dir/x-hook.sh
+
+[ -f /usr/share/initramfs-tools/hooks/dmsetup ] && mv -f /usr/share/initramfs-tools/hooks/dmsetup /tmp/
+
+### REPLACE INIT SCRIPT
+cat << "EOF_USR_SHARE_INITRAMFS-TOOLS_INIT" > /usr/share/initramfs-tools/init
+#!/bin/sh
+export PATH=/bin:/sbin
+mount -t sysfs -o nodev,noexec,nosuid sysfs /sys
+mount -t proc -o nodev,noexec,nosuid proc /proc
+#for x in $(cat /proc/cmdline); do
+#	case $x in
+#	initramfs.clear)
+#		clear
+#		;;
+#	quiet)
+#		quiet=y
+#		;;
+#	esac
+#done
+#if [ "$quiet" != "y" ]; then
+#	quiet=n
+#	echo "Loading, please wait..."
+#fi
+#export quiet
+export quiet=y
+mount -t devtmpfs -o nosuid,mode=0755,size=0 udev /dev
+[ ! -h /dev/fd ] && ln -s /proc/self/fd /dev/fd
+[ ! -h /dev/stdin ] && ln -s /proc/self/fd/0 /dev/stdin
+[ ! -h /dev/stdout ] && ln -s /proc/self/fd/1 /dev/stdout
+[ ! -h /dev/stderr ] && ln -s /proc/self/fd/2 /dev/stderr
+mkdir /dev/pts
+mount -t devpts -o noexec,nosuid,gid=5,mode=0620 devpts /dev/pts || true
+export DPKG_ARCH=
+. /conf/arch.conf
+export MODPROBE_OPTIONS="-qb"
+export ROOT=
+export ROOTDELAY=
+export ROOTFLAGS=
+export ROOTFSTYPE=
+export IP=
+export DEVICE=
+export BOOT=
+export BOOTIF=
+export UBIMTD=
+export break=
+export init=/lib/systemd/systemd
+export readonly=y
+export rootmnt=/root
+export debug=
+export panic=
+export blacklist=
+export resume=
+export resume_offset=
+export noresume=
+export drop_caps=
+export fastboot=n
+export forcefsck=n
+export fsckfix=
+. /conf/initramfs.conf
+for conf in conf/conf.d/*; do
+	[ -f "${conf}" ] && . "${conf}"
+done
+. /scripts/functions
+for x in $(cat /proc/cmdline); do
+	case $x in
+	init=*)
+		init=${x#init=}
+		;;
+	root=*)
+		ROOT=${x#root=}
+#		if [ -z "${BOOT}" ] && [ "$ROOT" = "/dev/nfs" ]; then
+#			BOOT=nfs
+#		fi
+		;;
+	rootflags=*)
+		ROOTFLAGS="-o ${x#rootflags=}"
+		;;
+	rootfstype=*)
+		ROOTFSTYPE="${x#rootfstype=}"
+		;;
+	rootdelay=*)
+		ROOTDELAY="${x#rootdelay=}"
+		case ${ROOTDELAY} in
+		*[![:digit:].]*)
+			ROOTDELAY=
+			;;
+		esac
+		;;
+#	nfsroot=*)
+#		NFSROOT="${x#nfsroot=}"
+#		;;
+	initramfs.runsize=*)
+		RUNSIZE="${x#initramfs.runsize=}"
+		;;
+	ip=*)
+		IP="${x#ip=}"
+		;;
+	boot=*)
+		BOOT=${x#boot=}
+		;;
+	ubi.mtd=*)
+		UBIMTD=${x#ubi.mtd=}
+		;;
+	resume=*)
+		RESUME="${x#resume=}"
+		;;
+	resume_offset=*)
+		resume_offset="${x#resume_offset=}"
+		;;
+	noresume)
+		noresume=y
+		;;
+	drop_capabilities=*)
+		drop_caps="-d ${x#drop_capabilities=}"
+		;;
+	panic=*)
+		panic="${x#panic=}"
+		;;
+	ro)
+		readonly=y
+		;;
+	rw)
+		readonly=n
+		;;
+	debug)
+		debug=y
+		quiet=n
+		if [ -n "${netconsole}" ]; then
+			log_output=/dev/kmsg
+		else
+			log_output=/run/initramfs/initramfs.debug
+		fi
+		set -x
+		;;
+	debug=*)
+		debug=y
+		quiet=n
+		set -x
+		;;
+	break=*)
+		break=${x#break=}
+		;;
+	break)
+		break=premount
+		;;
+	blacklist=*)
+		blacklist=${x#blacklist=}
+		;;
+	netconsole=*)
+		netconsole=${x#netconsole=}
+		[ "$debug" = "y" ] && log_output=/dev/kmsg
+		;;
+	BOOTIF=*)
+		BOOTIF=${x#BOOTIF=}
+		;;
+	fastboot|fsck.mode=skip)
+		fastboot=y
+		;;
+	forcefsck|fsck.mode=force)
+		forcefsck=y
+		;;
+	fsckfix|fsck.repair=yes)
+		fsckfix=y
+		;;
+	fsck.repair=no)
+		fsckfix=n
+		;;
+	esac
+done
+if [ -z "${BOOT}" ]; then
+	BOOT=local
+fi
+if [ -n "${noresume}" ] || [ "$RESUME" = none ]; then
+	noresume=y
+else
+	resume=${RESUME:-}
+fi
+mount -t tmpfs -o "nodev,noexec,nosuid,size=${RUNSIZE:-10%},mode=0755" tmpfs /run
+mkdir -m 0700 /run/initramfs
+#if [ -n "$log_output" ]; then
+#	exec >"$log_output" 2>&1
+#	unset log_output
+#fi
+maybe_break top
+run_scripts /scripts/init-top
+maybe_break modules
+#[ "$quiet" != "y" ] && log_begin_msg "Loading essential drivers"
+[ -n "${netconsole}" ] && /sbin/modprobe netconsole netconsole="${netconsole}"
+load_modules
+#[ "$quiet" != "y" ] && log_end_msg
+starttime="$(_uptime)"
+starttime=$((starttime + 1)) # round up
+export starttime
+if [ "$ROOTDELAY" ]; then
+	sleep "$ROOTDELAY"
+fi
+maybe_break premount
+#[ "$quiet" != "y" ] && log_begin_msg "Running /scripts/init-premount"
+run_scripts /scripts/init-premount
+#[ "$quiet" != "y" ] && log_end_msg
+maybe_break mount
+#log_begin_msg "Mounting root file system"
+. /scripts/local
+#. /scripts/nfs
+. "/scripts/${BOOT}"
+parse_numeric "${ROOT}"
+maybe_break mountroot
+mount_top
+mount_premount
+mountroot
+OVERLAY_DIR=/run/x-overlay
+/sbin/modprobe overlay || exit $?
+for _dir in boot etc home opt root srv usr var; do
+	LOWER_DIR=$rootmnt/$_dir
+	UPPER_DIR=$OVERLAY_DIR/upper_dir/$_dir
+	WORK_DIR=$OVERLAY_DIR/work_dir/$_dir
+	[ $_dir = root ] && _mode=0700 || _mode=0755
+	mkdir -m $_mode -p $UPPER_DIR $WORK_DIR || exit $?
+	TARGET_DIR=$rootmnt/$_dir
+	mount -t overlay -o rw,noatime,lowerdir=$LOWER_DIR,upperdir=$UPPER_DIR,workdir=$WORK_DIR,uuid=on overlay $TARGET_DIR || exit $?
+done
+#mount -t ramfs -o rw,noatime,mode=0700 ramfs $rootmnt/root || exit $?
+mount -t ramfs -o rw,noatime ramfs $rootmnt/media || exit $?
+mount -t ramfs -o rw,noatime ramfs $rootmnt/mnt || exit $?
+mount -t ramfs -o rw,noatime,nosuid,nodev,mode=1777 ramfs $rootmnt/tmp || exit $?
+#/bin/cpio -imD $rootmnt < $rootmnt/boot/rootfs.cpio 2>/dev/null &
+#log_end_msg
+#if read_fstab_entry /usr; then
+#	log_begin_msg "Mounting /usr file system"
+#	mountfs /usr
+#	log_end_msg
+#fi
+mount_bottom
+#nfs_bottom
+local_bottom
+maybe_break bottom
+#[ "$quiet" != "y" ] && log_begin_msg "Running /scripts/init-bottom"
+run_scripts /scripts/init-bottom
+#[ "$quiet" != "y" ] && log_end_msg
+mount -n -o move /run ${rootmnt}/run
+#validate_init() {
+#	run-init -n "${rootmnt}" "${1}"
+#}
+#if ! validate_init "$init"; then
+#	echo "Target filesystem doesn't have requested ${init}."
+#	init=
+#	for inittest in /sbin/init /etc/init /bin/init /bin/sh; do
+#		if validate_init "${inittest}"; then
+#			init="$inittest"
+#			break
+#		fi
+#	done
+#fi
+#if ! validate_init "${init}" ; then
+#	panic "No init found. Try passing init= bootarg."
+#fi
+#maybe_break init
+unset debug
+unset MODPROBE_OPTIONS
+unset DPKG_ARCH
+unset ROOTFLAGS
+unset ROOTFSTYPE
+unset ROOTDELAY
+unset ROOT
+unset IP
+unset BOOT
+unset BOOTIF
+unset DEVICE
+unset UBIMTD
+unset blacklist
+unset break
+unset noresume
+unset panic
+unset quiet
+unset readonly
+unset resume
+unset resume_offset
+unset noresume
+unset fastboot
+unset forcefsck
+unset fsckfix
+unset starttime
+mount -n -o move /sys ${rootmnt}/sys
+mount -n -o move /proc ${rootmnt}/proc
+#wait
+#cat << EOF > $rootmnt/lib/udev/rules.d/backlight.rules
+#SUBSYSTEM=="backlight", ACTION=="add", KERNEL=="intel_backlight", ATTR{brightness}="500", RUN+="/bin/rm -rf /lib/udev/rules.d/backlight.rules"
+#EOF
+#cat ${rootmnt}/proc/modules > ${rootmnt}/run/modules.txt | true
+exec run-init ${drop_caps} "${rootmnt}" "${init}" "$@" <"${rootmnt}/dev/console" >"${rootmnt}/dev/console" 2>&1
+echo "Something went badly wrong in the initramfs."
+panic "Please file a bug on initramfs-tools."
+EOF_USR_SHARE_INITRAMFS-TOOLS_INIT
+
+# Remove comment
+sed -i '2,$ {/^\s*#/d; /^\s*$/d}' /usr/share/initramfs-tools/init
+# Remove space
+sed -i 's/\t//g; s/[[:space:]]\{2,\}//g' /usr/share/initramfs-tools/init
+
+### UPDATE INITRAMFS
+echo "update-initramfs -v -d -c -k all"
+update-initramfs -v -d -c -k all
+
+rm -rfv $_hooks_dir/x-hook.sh
+[ -f /tmp/dmsetup ] && mv -f /tmp/dmsetup /usr/share/initramfs-tools/hooks/
