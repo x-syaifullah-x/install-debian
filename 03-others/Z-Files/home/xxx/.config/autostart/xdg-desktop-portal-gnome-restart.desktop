@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Restar xdg desktop portal gnome
+Exec=/usr/bin/systemctl --user restart xdg-desktop-portal-gnome.service
+OnlyShowIn=GNOME;
+NoDisplay=true

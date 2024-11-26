@@ -1,0 +1,34 @@
+#!/bin/bash
+
+if [ $(id -u 2>/dev/null) -eq 0 ]; then
+  echo "Do not run this script as root!"; exit 0
+fi
+
+function _install_package {
+	su -c '
+		DEBIAN_FRONTEND=noninteractive
+		apt-get update 2>&1 >/dev/null || exit $?
+		apt-get install --no-install-recommends --no-install-suggests $@ || exit $?
+	'
+}
+
+# FIX dbus-daemon[447]: Unknown username "rtkit" in message bus configuration file
+grep -qs rtkit /etc/passwd || cat << EOF | sudo tee -a /etc/passwd 2>&1 >/dev/null
+rtkit:x:101:106:RealtimeKit,,,:/proc:/usr/sbin/nologin
+EOF
+
+_install_package rtkit xdg-desktop-portal
+systemctl --user restart xdg-desktop-portal.service
+
+_packages=(
+	"wireplumber"
+	"pipewire-pulse"
+	"pipewire-libcamera"
+	"libspa-0.2-bluetooth"
+)
+_install_package ${_packages[@]}
+
+systemctl --user restart wireplumber
+systemctl --user restart pipewire-pulse.socket
+
+[ $? -eq 0 ] && echo "Install success ..."

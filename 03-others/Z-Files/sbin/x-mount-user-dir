@@ -1,0 +1,119 @@
+#! /bin/bash
+
+_LOG_PATH="/dev/null"
+
+_USER="${_USER:-xxx}"
+[ "$_USER" = "" ] && echo "Please set ENV _USER=" > $_LOG_PATH && exit 0
+
+_USER_HOME="${_USER_HOME:-/home/xxx}"
+[ "$_USER_HOME" = "" ] && echo "Please set ENV _USER_HOME=" > $_LOG_PATH && exit 0
+
+_PROPERTIES="${_PROPERTIES:-${_USER_HOME}/.config/x-mount-user-dir.properties}"
+[ ! -f "$_PROPERTIES" ] && echo "File $_PROPERTIES not found" > $_LOG_PATH && exit 0
+
+_OVERLAY_DIR="${_OVERLAY_DIR:-/run/x-mount-user-dir}"
+
+_SIZE_OF_K="16217244k"
+_UID=$(id $_USER --user)
+_GID=$(id $_USER --group)
+
+while read -r _properties; do
+  # IS_BLANK_TEXT
+  [[ -z "$_properties" ]] && continue
+  # IS_COMMENT
+  [[ "${_properties:0:1}" == "#" ]] && continue
+  # INITIALIZATION $_PATH, $_TYPE
+  _PROPS=($_properties)
+  _PARTITION="${_PROPS[0]}"
+  _PATH="${_PROPS[1]}"
+  _TYPE="${_PROPS[2]}"
+  # VALIDATION $_PATH
+  if [[ "$_PATH" != "$_USER_HOME"*  ]]; then
+    echo "$_PATH. You can only mount directories in folders $_USER_HOME, Please check the config in $_PROPERTIES" > $_LOG_PATH
+    continue
+  fi
+
+  OPTIONS="rw,noatime,nodiratime"
+  if [ "$_TYPE" == "ramfs" ]; then
+    if [ "$1" = "check" ]; then
+      ! grep -qs "$_PARTITION $_PATH $_TYPE $OPTIONS" /proc/mounts && echo "Not Mounted $_PATH"
+      continue
+    fi
+    if [ "$1" = "enable" ]; then
+      grep -qs "$_PARTITION $_PATH $_TYPE $OPTIONS" /proc/mounts && continue
+      if [ -d "$_PATH" ]; then
+        for i in $(ls -A $_PATH); do
+          rm -rfv "$_PATH/$i" > $_LOG_PATH
+        done
+      else
+        mkdir -pv $_PATH > $_LOG_PATH
+        chown $_USER:$_USER $_PATH > $_LOG_PATH
+      fi
+      mount -v $_PARTITION -t $_TYPE -o $OPTIONS $_PATH > $_LOG_PATH
+      chown -R $_UID:$_GID $_PATH
+      continue
+    fi
+    if [ "$1" = "disable" ]; then
+      umount -v --lazy $_PATH > $_LOG_PATH
+      continue
+    fi
+    echo "Args: check | enable | disable"
+    break
+  fi
+
+  OPTIONS="rw,noatime,nodiratime,size=$_SIZE_OF_K,nr_inodes=0,mode=755,uid=$_UID,gid=$_GID,inode64"
+  if [ "$_TYPE" == "tmpfs" ]; then
+    if [ "$1" = "check" ]; then
+      ! grep -qs "$_PARTITION $_PATH $_TYPE $OPTIONS" /proc/mounts && echo "Not Mounted $_PATH"
+      continue
+    fi
+    if [ "$1" = "enable" ]; then
+      grep -qs "$_PARTITION $_PATH $_TYPE $OPTIONS" /proc/mounts && continue
+      if [ -d "$_PATH" ]; then
+        for i in $(ls -A $_PATH); do
+          rm -rfv "$_PATH/$i" > $_LOG_PATH
+        done
+      else
+        mkdir -pv $_PATH > $_LOG_PATH
+        chown $_USER:$_USER $_PATH > $_LOG_PATH
+      fi
+      mount -v $_PARTITION -t $_TYPE -o $OPTIONS $_PATH > $_LOG_PATH
+      continue
+    fi
+    if [ "$1" = "disable" ]; then
+      umount -v --lazy $_PATH > $_LOG_PATH
+      continue
+    fi
+    echo "Args: check | enable | disable"
+    break
+  fi
+
+  LOWER_DIR=$_PATH
+  UPPER_DIR="$_OVERLAY_DIR/upper_dir$LOWER_DIR"
+  WORK_DIR="$_OVERLAY_DIR/work_dir$LOWER_DIR"
+  TARGET_DIR=$_PATH
+  OPTIONS="rw,noatime,nodiratime,lowerdir=$LOWER_DIR,upperdir=$UPPER_DIR,workdir=$WORK_DIR,uuid=on"
+  if [ "$_TYPE" == "overlay" ]; then
+    if [ "$1" = "check" ]; then
+      ! grep -qs "$_PARTITION $_PATH $_TYPE $OPTIONS" /proc/mounts && echo "Not Mounted $_PATH"
+      continue
+    fi
+    if [ "$1" = "enable" ]; then
+      grep -qs "$_PARTITION $TARGET_DIR $_TYPE $OPTIONS" /proc/mounts && continue
+      [ ! -d $LOWER_DIR ] && mkdir -p $LOWER_DIR && chown -R $_USER:$_USER $LOWER_DIR
+      [ ! -d $UPPER_DIR ] && mkdir -p $UPPER_DIR && chown -R $_USER:$_USER $UPPER_DIR
+      [ ! -d $WORK_DIR ] && mkdir -p $WORK_DIR && chown -R $_USER:$_USER $WORK_DIR
+      [ ! -d $TARGET_DIR ] && mkdir -p $TARGET_DIR && chown -R $_USER:$_USER $TARGET_DIR
+      mount -v $_PARTITION -t $_TYPE -o $OPTIONS $TARGET_DIR > $_LOG_PATH
+      continue
+    fi
+    if [ "$1" = "disable" ]; then
+      umount -v --lazy $_PATH > $_LOG_PATH
+      if [[ "$_TYPE" == "overlay" ]]; then
+        rm -rfv $_OVERLAY_DIR/{upper_dir,work_dir}$_PATH > $_LOG_PATH
+      fi
+    fi
+    echo "Args: check | enable | disable"
+    break
+  fi
+done < $_PROPERTIES

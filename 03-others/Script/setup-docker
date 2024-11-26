@@ -1,0 +1,9 @@
+#!/bin/sh
+
+tee /etc/docker/daemon.json << EOF
+{
+	"iptables": false
+}
+EOF
+
+apt install --no-install-suggests --no-install-recommends docker.io ca-certificates

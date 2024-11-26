@@ -1,0 +1,102 @@
+#!/bin/bash
+
+if [ $(id -u 2>/dev/null) -ne 0 ]; then
+	echo "Please running script as user root"; exit 0
+fi
+
+function _usage (){
+	echo "Usage: FILE_SYSTEM_TYPE=ext4 $0 --rootfs-dir /mnt/dir --disk /dev/sdxX"
+	echo "Usage: $0 --rootfs-dir /mnt/dir --disk /dev/sdxX"
+	exit 1
+}
+
+### PARSE ARGS
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--rootfs-dir)
+			if [ -z "$2" ]; then
+				echo "Error: Missing value for --rootfs-dir"; exit 1
+			fi
+			ROOT_DIR="$2"; shift 2
+			;;
+		--disk)
+			if [ -z "$2" ]; then
+			  echo "Error: Missing value for --disk"; exit 1
+			fi
+			DISK="$2"; shift 2
+			;;
+		*)
+		_usage
+			;;
+	esac
+done
+
+### ROOT_DIR
+if [ -z "$ROOT_DIR" ]; then
+	_usage
+fi
+if [ "$ROOT_DIR" = "/" ]; then
+	printf "Invalid --rootfs-dir=/"; exit 1
+fi
+
+ROOT_DIR_OVERLAY="/run/x-rootfs_overlay"
+
+_umount_rootfs_dir() {
+	if [ ! -z "$DISK" ]; then
+		umount -v --recursive $ROOT_DIR || exit $?
+		[ -d "$ROOT_DIR" ] && [ -z "$(ls -A $ROOT_DIR)" ] && rm -rf $ROOT_DIR
+	else
+		for dir in $(mount | grep "$ROOT_DIR/" | awk '{print $3}'); do
+			mount | grep -q "on $dir type" && umount -v --recursive $dir
+		done
+	fi
+
+	[ -d $ROOT_DIR_OVERLAY ] && rm -rf $ROOT_DIR_OVERLAY
+}
+
+trap _umount_rootfs_dir SIGINT
+
+### CHECK DISK
+if [ ! -z "$DISK" ]; then
+	if ! cat /proc/mounts | grep -qs "$DISK $ROOT_DIR"; then
+		mount  -v $DISK $ROOT_DIR  --mkdir || exit $?
+	fi
+fi
+
+### MOUNTS
+echo "Mount FS ..."
+declare -A dirs
+dirs["dev"]="udev devtmpfs rw,nosuid,size=0k,nr_inodes=2007291,mode=755,inode64"
+dirs["dev/pts"]="devpts devpts rw,nosuid,noexec,gid=5,mode=620,ptmxmode=000"
+dirs["proc"]="proc proc rw,nosuid,nodev,noexec"
+dirs["sys"]="sysfs sysfs rw,nosuid,nodev,noexec"
+dirs["tmp"]="ramfs ramfs rw,nosuid,nodev,mode=1777"
+dirs["run"]="tmpfs tmpfs rw,nosuid,nodev,noexec,size=100%,mode=755,inode64"
+dirs["run/lock"]="tmpfs tmpfs rw,nosuid,nodev,noexec,size=5120k --mkdir"
+for dir in ${!dirs[@]}; do
+	_args=(${dirs["$dir"]})
+	_device="${_args[0]}"
+	_type="${_args[1]}"
+	_options="${_args[2]}"
+	_mkdir="${_args[3]}"
+	_target="$ROOT_DIR/$dir"
+	mount | grep -q "on $_target type $_type" || {
+		mount $_device --types $_type -o $_options $_target $_mkdir || exit $?
+	}
+done
+[ -d $ROOT_DIR_OVERLAY ] && echo "$ROOT_DIR_OVERLAY already exist" exit 1
+for dir in etc media mnt opt home root usr var; do
+	LOWER_DIR=$ROOT_DIR/$dir
+	UPPER_DIR=$ROOT_DIR_OVERLAY/upper_dir/$dir
+	WORK_DIR=$ROOT_DIR_OVERLAY/work_dir/$dir
+	TARGET_DIR=$ROOT_DIR/$dir
+	mkdir -p $UPPER_DIR $WORK_DIR || exit $?
+	mount none --types overlay -o rw,noatime,lowerdir=$LOWER_DIR,upperdir=$UPPER_DIR,workdir=$WORK_DIR $TARGET_DIR || exit $?
+done
+
+CURRENT_DIR="/$(realpath --relative-to=/ $(dirname $0))"
+
+### RUNNING CHROOT
+sudo chroot $ROOT_DIR /bin/bash < $CURRENT_DIR/update
+
+_umount_rootfs_dir

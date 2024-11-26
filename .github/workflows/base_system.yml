@@ -1,0 +1,88 @@
+name: base_system
+
+on:
+  push:
+    branches: [ master ]
+
+jobs:
+  base_system:
+    permissions: write-all
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        arch:
+          - amd64
+          - arm64
+        codename:
+          - bookworm
+          - trixie
+        r_type:
+          - base
+          - base_noman
+          - base_noapt
+          - base_noman_noapt
+    env:
+      DEBIAN_FRONTEND : noninteractive
+      GITHUB_TOKEN    : ${{ secrets.GITHUB_TOKEN }}
+      ROOTFS_DIR      : ${{ github.workspace }}/rootfs
+      ARCH            : ${{ matrix.arch }}
+      CODENAME        : ${{ matrix.codename }}
+      ROOTFS_TYPE     : ${{ matrix.r_type }}
+      RESULT_XZ       : ${{ github.workspace }}/${{ matrix.codename }}_${{ matrix.arch }}_${{ matrix.r_type }}.tar.xz
+
+    steps:
+      - name: CHECKOUT
+        uses: actions/checkout@v4
+
+      - name: SETUP DEBOOTSTRAP
+        run: |
+          _DOCKER_IMAGE="debian:$CODENAME"
+          _PLATFORM="linux/$ARCH"
+          _ARCH_HOST=$(dpkg --print-architecture)
+          if [ $_ARCH_HOST != $ARCH ]; then
+            sudo apt install --no-install-suggests --no-install-recommends qemu-user-static -y 2>&1 >/dev/null
+            docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+          fi
+          docker pull --platform $_PLATFORM $_DOCKER_IMAGE
+          container_name="x-container-${CODENAME}"
+          mkdir -pv $ROOTFS_DIR
+          ROOTFS_DIR_NAME=$(basename $ROOTFS_DIR)
+          docker create --name "$container_name" --privileged -e "DEBIAN_FRONTEND=noninteractive" -v "${{ github.workspace }}:/x" -v "$ROOTFS_DIR:/$ROOTFS_DIR_NAME" --entrypoint "tail" --platform "$_PLATFORM" "$_DOCKER_IMAGE" -f /dev/null
+          docker start $container_name
+          docker exec $container_name apt-get update 2>&1 >/dev/null
+          docker exec $container_name apt-get upgrade --no-install-suggests --no-install-recommends -y 2>&1 >/dev/null
+
+          make_rootfs_args="$ROOTFS_DIR_NAME"
+          if [[ "$ROOTFS_TYPE" = "base_noapt" || "$ROOTFS_TYPE" = "base_noman_noapt" ]]; then
+            make_rootfs_args="$make_rootfs_args --without-apt"
+          fi
+
+          if [[ "$ROOTFS_TYPE" = "base_noman" || "$ROOTFS_TYPE" = "base_noman_noapt" ]]; then
+            make_rootfs_args="$make_rootfs_args --without-man"
+          fi
+
+          _script_dir="/x/00-scripts/rootfs"
+          if [ $CODENAME = bookworm ]; then
+            make_rootfs_script="$_script_dir/make_rootfs_bookworm.sh"
+          elif [ $CODENAME = trixie ]; then
+            make_rootfs_script="$_script_dir/make_rootfs_trixie.sh"
+          else
+            exit 127
+          fi
+          docker exec $container_name chmod +x $make_rootfs_script
+          docker exec $container_name $make_rootfs_script $make_rootfs_args
+
+          # docker exec $container_name apt-get install --no-install-suggests --no-install-recommends apt-utils debootstrap -y 2>&1 >/dev/null
+          # export INCLUDE_PACKAGE="apt-utils,bash-completion"
+          # export EXCLUDE_PACKAGE="e2fsprogs,sysvinit-utils"
+          # docker exec $container_name debootstrap --variant=minbase --arch $ARCH --exclude=$EXCLUDE_PACKAGE --include=$INCLUDE_PACKAGE $CODENAME /$ROOTFS_DIR_NAME http://deb.debian.org/debian
+
+      - name: MAKE ARTIFACT
+        run: |
+          sudo apt install --no-install-recommends --no-install-suggests xz-utils -y
+          cd "$ROOTFS_DIR" && sudo tar --use-compress-program='xz -9' -cf $RESULT_XZ *
+
+      - name: UPLOAD ARTIFACT
+        run: |
+          gh release create v1.0.0 --title "ROOTFS DEBIAN" --latest=false || true
+          gh release upload v1.0.0 $RESULT_XZ --clobber

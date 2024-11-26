@@ -1,0 +1,77 @@
+#!/bin/bash
+
+if [ $(id -u) -ne 0 ]; then
+	echo "Must be superuser to run this script ..."; exit 1
+fi
+
+_interface="$1"
+
+if [ -z "$_interface" ]; then
+  echo "Interface name is empty"
+  exit 1
+fi
+
+if [ ! -e "/sys/class/net/$_interface" ]; then
+  echo "Interface $_interface not found"
+  exit 1
+fi
+
+apt install --no-install-suggests --no-install-recommends hostapd iptables || exit $?
+
+tee /etc/hostapd/hostapd.conf << EOF
+interface=$_interface
+#driver=nl80211
+#ieee80211n=1
+#ht_capab=[HT40+][SHORT-GI-20][SHORT-GI-40]
+ssid=$(cat /etc/hostname)
+# HW MODE
+#   a : 5GHz
+#   b : 2.4GHz
+hw_mode=g
+channel=6
+wmm_enabled=0
+macaddr_acl=0
+auth_algs=1
+# IGNORE BROADCASE SSID
+#   0: visible
+#   1: hidden
+ignore_broadcast_ssid=0
+wpa=2
+wpa_passphrase=3172041902920013
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=TKIP CCMP
+ctrl_interface=/var/run/hostapd
+ctrl_interface_group=0
+ap_isolate=0
+EOF
+
+systemctl unmask hostapd.service
+systemctl restart hostapd.service
+
+_ip_addr=192.168.2.1
+tee "/etc/systemd/network/10-${_interface}.network" << EOF
+[Match]
+Name=$_interface
+
+[Network]
+Address=$_ip_addr/24
+DHCPServer=yes
+
+[DHCPServer]
+PoolOffset=2
+PoolSize=9
+DNS=$_ip_addr
+DNS=8.8.8.8
+EOF
+
+systemctl restart systemd-networkd
+
+_inet=enp3s0
+if ! iptables -t nat -L -v -n | grep -q "MASQUERADE"; then
+  iptables -t nat -A POSTROUTING -o $_inet -j MASQUERADE
+fi
+
+if ! iptables -L FORWARD -v -n | grep -q $_interface; then
+  iptables -A FORWARD -i $_interface -o $_inet -j ACCEPT
+  iptables -A FORWARD -i $_net -o $_interface -j ACCEPT
+fi
