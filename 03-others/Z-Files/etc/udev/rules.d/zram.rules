@@ -1,0 +1,1 @@
+KERNEL=="zram0", SUBSYSTEM=="block", ACTION=="add", ATTR{initstate}=="0", ATTR{comp_algorithm}="lz4", ATTR{disksize}="15830M", RUN="/sbin/mkswap -U clear /dev/zram0", TAG+="systemd"

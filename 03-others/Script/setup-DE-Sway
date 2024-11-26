@@ -1,0 +1,25 @@
+#!/bin/bash
+
+if [ $(id -u 2>/dev/null) -ne 0 ]; then
+	echo "Please running as root ...!!!"
+	exit 127
+fi
+
+function _install_package {
+	DEBIAN_FRONTEND=noninteractive
+	apt update || exit $?
+	apt install --no-install-recommends --no-install-suggests $@ || exit $?
+}
+
+# FIX dbus-daemon[xxx]: Unknown username "polkitd" in message bus configuration file
+grep -qs polkitd "/etc/passwd" || cat << EOF | sudo tee -a /etc/passwd 2>&1 >/dev/null
+polkitd:x:997:997:polkit:/nonexistent:/usr/sbin/nologin
+EOF
+
+_packages=(
+	"sway"											# DESKTOP ENVIRONMENT
+	"foot"											# TERMINAL
+	"adwaita-icon-theme"				# THEME
+	"webp-pixbuf-loader"				# WEBP SUPPORT
+)
+_install_package ${_packages[@]} || exit $?

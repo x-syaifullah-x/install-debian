@@ -1,0 +1,37 @@
+#! /bin/bash
+
+OVERLAY_DIR=${OVERLAY_DIR:-"/run/x-overlay"}
+LOWER_DIRS=${LOWER_DIRS:-"/boot /etc /home /opt /srv /usr /var"}
+for LOWER_DIR in $LOWER_DIRS; do
+  [ ! -d $LOWER_DIR ] && continue
+  UPPER_DIR="$OVERLAY_DIR/upper_dir$LOWER_DIR"
+  WORK_DIR="$OVERLAY_DIR/work_dir$LOWER_DIR"
+  TARGET_DIR="$LOWER_DIR"
+  MOUNT_OPTIONS="rw,noatime,nodiratime,lowerdir=$LOWER_DIR,upperdir=$UPPER_DIR,workdir=$WORK_DIR,uuid=on"
+  if [ "$1" = "check" ]; then
+    ! grep -qs $MOUNT_OPTIONS /proc/mounts && echo "IS NOT OVERLAY DIRECOTRY $LOWER_DIR"
+  elif [ "$1" = "enable" ]; then
+    grep -qs $MOUNT_OPTIONS /proc/mounts && continue
+    mkdir -p $UPPER_DIR $WORK_DIR
+    if [ "$TARGET_DIR" == "/var" ]; then
+      DIR_LOG="$TARGET_DIR/log"
+      cp -rf --preserve=all $DIR_LOG $UPPER_DIR
+      umount $DIR_LOG &>/dev/null
+      umount $TARGET_DIR/backups &>/dev/null
+      umount $TARGET_DIR/cache &>/dev/null
+      umount $TARGET_DIR/lib/apt &>/dev/null
+    fi
+    mount -t overlay overlay -o $MOUNT_OPTIONS $TARGET_DIR
+  elif [ "$1" = "disable" ]; then
+    ! grep -qs $MOUNT_OPTIONS /proc/mounts && continue
+    umount --lazy $TARGET_DIR
+    if [ "$TARGET_DIR" == "/var" ]; then
+      mount -t tmpfs none -o defaults,noatime,nodiratime,size=100%,nr_inodes=0,mode=0755 $TARGET_DIR/log
+      [ -d $UPPER_DIR/log ] && cp -rf --preserve=all $UPPER_DIR/log $TARGET_DIR
+      mount -t tmpfs none -o defaults,noatime,nodiratime,size=100%,nr_inodes=0,mode=0755 $TARGET_DIR/backups
+      mount -t tmpfs none -o defaults,noatime,nodiratime,size=100%,nr_inodes=0,mode=0755 $TARGET_DIR/cache
+      mount -t tmpfs none -o defaults,noatime,nodiratime,size=100%,nr_inodes=0,mode=0755 $TARGET_DIR/lib/apt
+    fi
+    rm -rf $UPPER_DIR $WORK_DIR
+  fi
+done

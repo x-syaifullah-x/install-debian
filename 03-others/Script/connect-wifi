@@ -1,0 +1,42 @@
+#!/bin/bash
+
+if [ $(id -u 2>/dev/null) -ne 0 ]; then
+	echo "Please running as root ...!!!"
+	exit 127
+fi
+
+declare -A data
+data["MI 8"]="3172041902920013"
+data["Wi-Fi"]="3172041902920013"
+data["www"]="ayangiful"
+data["adibah.Net WiFi-"]="NONE"
+data["s905x"]="3172041902920013"
+
+_SSID="${*-:-1}"
+_PSK="${data["$_SSID"]}"
+
+case "$_PSK" in
+	"")
+		_SPARATOR="|"
+		for key in "${!data[@]}"; do
+			if [ -z "$_MESSAGE" ]; then
+				_MESSAGE="$key"
+			else
+				_MESSAGE="$_MESSAGE $_SPARATOR $key"
+			fi
+		done
+		echo "$_SPARATOR $_MESSAGE $_SPARATOR"
+		exit 127
+		;;
+	NONE)
+		_CFG=$(printf "update_config=1\nctrl_interface=DIR=/run/wpa_supplicant GROUP=root\nnetwork={\n\tssid=$_SSID\n\tkey_mgmt=NONE\n}")
+		;;
+	*)
+		_CFG=$(printf "update_config=1\nctrl_interface=DIR=/run/wpa_supplicant GROUP=root\n$(wpa_passphrase "$_SSID" "$_PSK")")
+		;;
+esac
+
+#printf "nameserver 8.8.8.8\nnameserver 8.8.4.4" > /etc/resolv.conf
+
+apt install --no-install-suggests --no-install-recommends wpasupplicant || exit $?
+echo "$_CFG" | wpa_supplicant -i wlp2s0b1 -c /dev/stdin -B || exit $?
