@@ -28,6 +28,7 @@ jobs:
       ARCH            : ${{ matrix.arch }}
       CODENAME        : ${{ matrix.codename }}
       ROOTFS_TYPE     : ${{ matrix.r_type }}
+      RESULT_XZ       : /tmp/rootfs_debian_${CODENAME}_${ARCH}_${ROOTFS_TYPE}.tar.xz
 
     steps:
       - name: CHECKOUT
@@ -78,12 +79,9 @@ jobs:
       - name: MAKE ARTIFACT
         run: |
           sudo apt install --no-install-recommends --no-install-suggests xz-utils -y
-          cd "$ROOTFS_DIR" && sudo tar --use-compress-program='xz -9' -cf /tmp/rootfs_debian_${CODENAME}_${ARCH}_${ROOTFS_TYPE}.tar.xz *
+          cd "$ROOTFS_DIR" && sudo tar --use-compress-program='xz -9' -cf $RESULT_XZ *
 
       - name: UPLOAD ARTIFACT
         run: |
-          _title="${CODENAME}-${ARCH}-$ROOTFS_TYPE"
-          _resources="/tmp/rootfs_debian_${CODENAME}_${ARCH}_${ROOTFS_TYPE}.tar.xz"
-          # gh release delete "$_title" --cleanup-tag --yes || true
-          gh release create v1.0.0 --title "Rootfs Debian" --latest=false || true
-          gh release upload v1.0.0 $_resources --clobber
+          gh release create v1.0.0 --title "ROOTFS DEBIAN" --latest=false || true
+          gh release upload v1.0.0 $RESULT_XZ --clobber
